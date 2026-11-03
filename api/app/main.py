@@ -1,10 +1,14 @@
-from fastapi import FastAPI, HTTPException, Response
+from pathlib import PurePath
+
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from .export_dxf import export_dxf
 from .export_pdf import export_pdf
 from .model import BuildingModel
 from .rooms import detect_rooms
+from .sketch.reader import read_sketch
 from .sample import sample_project
 from .store import ProjectStore
 
@@ -45,6 +49,37 @@ def save_project(id: str, model: BuildingModel) -> BuildingModel:
     if not store.save(id, model):
         raise HTTPException(404, "project not found")
     return model
+
+
+MAX_UPLOAD = 15 * 1024 * 1024
+
+
+class SketchReport(BaseModel):
+    warnings: list[str]
+    overlay: dict
+    stats: dict
+
+
+class SketchCreated(BaseModel):
+    id: str
+    report: SketchReport
+
+
+@app.post("/api/sketch", status_code=201)
+async def create_from_sketch(request: Request) -> SketchCreated:
+    """Read a photo of a hand-drawn plan (raw image bytes in the body) into a new project."""
+    data = await request.body()
+    if not data:
+        raise HTTPException(422, "Upload a photo of your sketch (JPG or PNG).")
+    if len(data) > MAX_UPLOAD:
+        raise HTTPException(413, "Image too large (max 15 MB).")
+    name = PurePath(request.headers.get("x-filename", "Sketch")).stem[:60] or "Sketch"
+    try:
+        result = await run_in_threadpool(read_sketch, data, name)
+    except ValueError as e:  # not an image, no walls found
+        raise HTTPException(422, str(e)) from e
+    pid = store.create(result.model)
+    return SketchCreated(id=pid, report=SketchReport(warnings=result.warnings, overlay=result.overlay, stats=result.stats))
 
 
 def _with_rooms(model: BuildingModel) -> BuildingModel:

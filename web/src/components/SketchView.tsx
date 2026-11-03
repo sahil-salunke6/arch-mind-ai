@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import rough from "roughjs";
+import type { SketchReport } from "../lib/api";
 import type { BuildingModel, Point } from "../types";
 import { bbox, pointOnWall, solidSpans, wallLength } from "../lib/geometry";
 
@@ -7,7 +8,50 @@ const S = 0.03; // px per mm: roughjs wobble is tuned for pixel-sized drawings
 const INK = "#2c3e94";
 
 /** The model redrawn as a pen-on-paper sketch, standing in for the user's photo in the demo. */
-export default function SketchView({ model, imageUrl }: { model: BuildingModel; imageUrl: string | null }) {
+const ROLE_COLORS: Record<string, string> = {
+  room: "#2563eb", size: "#059669", length: "#0d9488", margin: "#0d9488", gate: "#0d9488", road: "#0d9488",
+};
+
+/** The processed photo with what the reader found drawn on top: the check screen. */
+function ReadOverlay({ report }: { report: SketchReport }) {
+  const o = report.overlay;
+  const [show, setShow] = useState(true);
+  if (!o.image) return null;
+  return (
+    <div className="relative h-full w-full">
+      <svg viewBox={`0 0 ${o.width} ${o.height}`} className="h-full w-full">
+        <image href={o.image} width={o.width} height={o.height} />
+        {show && (
+          <g fill="none" strokeLinecap="round">
+            {o.ignored.map((s, i) => <line key={`i${i}`} x1={s[0]} y1={s[1]} x2={s[2]} y2={s[3]} stroke="#94a3b8" strokeWidth={3} strokeDasharray="6 6" />)}
+            {o.plot && <rect x={o.plot[0]} y={o.plot[1]} width={o.plot[2] - o.plot[0]} height={o.plot[3] - o.plot[1]} stroke="#16a34a" strokeWidth={5} strokeDasharray="14 8" />}
+            {o.walls.map((s, i) => <line key={`w${i}`} x1={s[0]} y1={s[1]} x2={s[2]} y2={s[3]} stroke="#6a45f5" strokeWidth={7} strokeOpacity={0.75} />)}
+            {o.stairs.map((r, i) => <rect key={`s${i}`} x={r[0]} y={r[1]} width={r[2] - r[0]} height={r[3] - r[1]} stroke="#f59e0b" strokeWidth={4} />)}
+            {o.labels.filter((l) => l.role !== "note").map((l, i) => (
+              <polygon key={`l${i}`} points={l.box.map((p) => p.join(",")).join(" ")} stroke={ROLE_COLORS[l.role] ?? "#64748b"} strokeWidth={2.5}
+                fill={ROLE_COLORS[l.role] ?? "#64748b"} fillOpacity={0.08} />
+            ))}
+          </g>
+        )}
+      </svg>
+      <label className="absolute top-2 right-2 flex items-center gap-1.5 rounded-lg bg-white/90 px-2 py-1 text-[11px] font-medium shadow-sm">
+        <input type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} className="accent-brand-600" /> Show what was read
+      </label>
+      {show && (
+        <div className="absolute bottom-2 left-2 flex flex-wrap gap-2 rounded-lg bg-white/90 px-2 py-1 text-[10px] shadow-sm">
+          <Key color="#6a45f5" label="Walls" /><Key color="#16a34a" label="Plot" /><Key color="#f59e0b" label="Stairs" />
+          <Key color="#2563eb" label="Room names" /><Key color="#059669" label="Sizes" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Key({ color, label }: { color: string; label: string }) {
+  return <span className="flex items-center gap-1"><span className="size-2.5 rounded-sm" style={{ background: color }} />{label}</span>;
+}
+
+export default function SketchView({ model, imageUrl, report }: { model: BuildingModel; imageUrl: string | null; report?: SketchReport | null }) {
   const plot = bbox(model.plot.polygon);
   const floor = model.floors[0];
   const tx = ([x, y]: Point): [number, number] => [(x - plot.x0) * S + 70, (plot.y1 - y) * S + 60];
@@ -49,6 +93,7 @@ export default function SketchView({ model, imageUrl }: { model: BuildingModel; 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model]);
 
+  if (report?.overlay.image) return <ReadOverlay report={report} />;
   if (imageUrl) {
     return <img src={imageUrl} alt="Uploaded hand drawing" className="h-full w-full object-contain" />;
   }

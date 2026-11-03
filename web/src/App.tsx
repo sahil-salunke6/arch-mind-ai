@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Box as BoxIcon, Maximize2, SquareDashed } from "lucide-react";
-import { api, type ProjectInfo } from "./lib/api";
+import { api, type ProjectInfo, type SketchReport } from "./lib/api";
 import { VIEWS, type BuildingModel, type Layers, type Selection, type Tool, type ViewName } from "./types";
 import { DownloadMenu, Stepper, TopNav, type SaveStatus } from "./components/Chrome";
 import { blankProject, deleteOpening, deleteWall } from "./lib/edit";
@@ -27,6 +27,8 @@ export default function App() {
   const [upload, setUpload] = useState<Upload | null>(null);
   const [prompt, setPrompt] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [reports, setReports] = useState<Record<string, SketchReport>>({});
   const [layout, setLayout] = useState<Layout>("Compare");
   const [view, setView] = useState<ViewName>("NE");
   const [mode, setMode] = useState<"2d" | "3d">("3d");
@@ -140,18 +142,31 @@ export default function App() {
 
   const onUpload = (f: File) => {
     if (upload) URL.revokeObjectURL(upload.url);
-    setUpload({ name: f.name, url: URL.createObjectURL(f) });
+    setUpload({ name: f.name, url: URL.createObjectURL(f), file: f });
     setNotice(null);
   };
 
-  const onGenerate = () => {
-    setNotice(
-      upload
-        ? "Your sketch is shown on the left. Automatic sketch reading is being built (Phase 1), so the plan and 3D model show the sample project for now."
-        : prompt.trim()
-          ? "Prompt-to-design is planned for Phase 3. Showing the sample project for now."
-          : "Upload a sketch or describe your house. Meanwhile, explore the sample project.",
-    );
+  const onGenerate = async () => {
+    if (!upload) {
+      setNotice(prompt.trim()
+        ? "Prompt-to-design is planned for Phase 3. Upload a photo of a hand-drawn plan to try sketch reading."
+        : "Upload a photo of your hand-drawn plan first.");
+      return;
+    }
+    setNotice(null);
+    setReading(true);
+    try {
+      const { id, report } = await api.readSketch(upload.file);
+      setReports((r) => ({ ...r, [id]: report }));
+      await refreshList();
+      await open(id);
+      setLayout("Compare");
+      setView("NE");
+    } catch (e) {
+      setNotice(`Couldn't read this sketch: ${(e as Error).message}`);
+    } finally {
+      setReading(false);
+    }
   };
 
   /** Exports are rendered from the saved model, so flush pending edits first. */
@@ -188,11 +203,12 @@ export default function App() {
         <LeftPanel
           upload={upload} onUpload={onUpload} onClear={() => { if (upload) URL.revokeObjectURL(upload.url); setUpload(null); }}
           prompt={prompt} onPrompt={setPrompt} onGenerate={onGenerate} notice={notice}
+          reading={reading} report={projectId ? reports[projectId] ?? null : null}
           projects={projects} current={projectId} onOpen={open} onNew={newProject}
         />
 
         <section className="flex min-w-0 flex-col gap-3">
-          <div className="rounded-2xl border border-black/5 bg-white shadow-sm"><Stepper active={3} /></div>
+          <div className="rounded-2xl border border-black/5 bg-white shadow-sm"><Stepper active={reading ? 1 : 3} /></div>
 
           <div className="flex items-center gap-1 self-start rounded-xl border border-black/5 bg-white p-1 shadow-sm">
             {(["Compare", "2D Plan", "3D Model"] as Layout[]).map((l) => (
@@ -205,8 +221,8 @@ export default function App() {
 
           <div className={`grid min-h-[480px] flex-1 gap-3 ${layout === "Compare" ? "md:grid-cols-3" : ""}`}>
             {layout === "Compare" && (
-              <Card title={upload ? "Hand-Drawn Input" : "Hand-Drawn Input (sample)"}>
-                <SketchView model={model} imageUrl={upload?.url ?? null} />
+              <Card title={projectId && reports[projectId] ? "Hand-Drawn Input (what was read)" : upload ? "Hand-Drawn Input" : "Hand-Drawn Input (sample)"}>
+                <SketchView model={model} imageUrl={upload?.url ?? null} report={projectId ? reports[projectId] ?? null : null} />
               </Card>
             )}
             {show2D && (

@@ -22,6 +22,24 @@ npm run dev
 
 Tests: `cd api && .venv/Scripts/python -m pytest`. Typecheck: `cd web && npm run typecheck`.
 
+## Reading a hand-drawn sketch
+
+Upload a photo of a hand-drawn plan and press **Generate Design**. The API (`api/app/sketch/`):
+
+1. flattens the page (phone photo of paper on a table) and removes shadows (`image.py`);
+2. reads the handwriting with RapidOCR (PaddleOCR models on ONNX Runtime, CPU only): room names,
+   sizes like `12' x 14'`, plot dimensions, margins, road side and gate (`text.py`);
+3. finds straight pen strokes: single- or double-line walls, the plot boundary, stair treads; dimension
+   arrows and the road are set aside (`lines.py`);
+4. snaps walls to a grid and **solves the real positions from the written sizes** by least squares, since
+   sketches are never to scale; drawn proportions only fill in where nothing is written. Written sizes
+   that can't all be true are listed as warnings (`reader.py`);
+5. turns short gaps into doorways, builds the walls, plot and setbacks, and names rooms from the labels.
+
+The result opens as a normal project; fix anything that's off in the editor. Best results: plain paper,
+dark pen, whole page in frame, sizes written for every room and the plot. Not yet read: windows (gaps
+come out as doorways), Hindi handwriting, curved or angled walls.
+
 ## Editing plans
 
 In the 2D plan, choose a tool from the toolbar (keyboard shortcut in brackets):
