@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-hand: "Kalam", cursive;
+  --color-brand-50: #f4f1ff;
+  --color-brand-100: #ebe5ff;
+  --color-brand-200: #d6ccff;
+  --color-brand-500: #7c5cff;
+  --color-brand-600: #6a45f5;
+  --color-brand-700: #5a35dc;
+  --color-ink: #1d1b2e;
+}
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: #f6f6fb; color: var(--color-ink); }
