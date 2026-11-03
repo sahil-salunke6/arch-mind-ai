@@ -53,7 +53,43 @@ def read_text(img: np.ndarray) -> list[Label]:
     labels = []
     for lb in _ocr(img):
         labels += _split_repeats(_reread_sideways(img, lb))
-    return labels
+    return _join_stacked(labels)
+
+
+def _is_words(t: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z &/'.-]*", t.strip()))
+
+
+def _join_stacked(labels: list[Label]) -> list[Label]:
+    """Room names written over two or three lines ("MASTER / BEDROOM", "LARGE / LIVING / HALL") are
+    read as separate boxes; join word-only boxes stacked tightly above each other."""
+    labels = sorted(labels, key=lambda lb: lb.center[1])
+    used: set[int] = set()
+    out = []
+    for i, top in enumerate(labels):
+        if i in used:
+            continue
+        group = [top]
+        if _is_words(top.text):
+            for j in range(i + 1, len(labels)):
+                lb, last = labels[j], group[-1]
+                if j in used or not _is_words(lb.text) or len(group) == 3:
+                    continue
+                lx0, lx1 = last.poly[:, 0].min(), last.poly[:, 0].max()
+                bx0, bx1 = lb.poly[:, 0].min(), lb.poly[:, 0].max()
+                gap = lb.poly[:, 1].min() - last.poly[:, 1].max()
+                overlap = min(lx1, bx1) - max(lx0, bx0)
+                if -0.4 * last.height < gap < 0.7 * last.height and overlap > 0.4 * min(lx1 - lx0, bx1 - bx0):
+                    group.append(lb)
+                    used.add(j)
+        if len(group) == 1:
+            out.append(top)
+            continue
+        pts = np.vstack([g.poly for g in group])
+        x0, y0, x1, y1 = pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max()
+        poly = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+        out.append(Label(text=" ".join(g.text for g in group), poly=poly, score=min(g.score for g in group)))
+    return out
 
 
 def _reread_sideways(img: np.ndarray, lb: Label) -> Label:
@@ -114,7 +150,7 @@ ROOM_WORDS: list[tuple[str, str, str]] = [  # (pattern, type, display name)
     (r"stair|steps|सीढ़ी", "stair", "Staircase"),
     (r"balcony|sit\s*out|verandah?", "balcony", "Balcony"),
     (r"store|storage", "store", "Store"),
-    (r"utility|wash", "utility", "Utility"),
+    (r"utility|wash|laundry", "utility", "Laundry"),
     (r"foyer|lobby|entrance|passage", "foyer", "Foyer"),
 ]
 SIDES = {"east": "east", "west": "west", "north": "north", "south": "south"}
@@ -133,8 +169,31 @@ def parse_length(text: str) -> float | None:
     return None
 
 
+VOCAB = ["bedroom", "master", "toilet", "bath", "bathroom", "kitchen", "living", "hall", "drawing", "dining",
+         "parking", "garage", "puja", "pooja", "stair", "staircase", "balcony", "store", "storage", "utility",
+         "wash", "laundry", "foyer", "lobby", "entrance", "passage", "attached", "common", "guest", "study"]
+
+
+def _fix_spelling(text: str) -> str:
+    """OCR of handwriting slips a letter or two ("Diinng", "Bathrocm"); snap words to the room vocabulary."""
+    from difflib import get_close_matches
+
+    out = []
+    for word in text.split():
+        core = re.sub(r"[^a-z]", "", word.lower())
+        if len(core) >= 4 and core not in VOCAB:
+            match = get_close_matches(core, VOCAB, n=1, cutoff=0.75)
+            if match:
+                out.append(match[0].capitalize() if word[:1].isupper() else match[0])
+                continue
+        out.append(word)
+    return " ".join(out)
+
+
 def classify(labels: list[Label]) -> list[Label]:
     for lb in labels:
+        if _is_words(lb.text):
+            lb.text = _fix_spelling(lb.text)
         t = lb.text
         low = t.lower()
         if (m := SIZE.match(t)) or (m := SIZE_ANY.search(t)):

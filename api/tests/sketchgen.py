@@ -14,7 +14,7 @@ INK = (150, 60, 30)  # blue-ish ballpoint (BGR)
 
 
 def draw_sketch(model: BuildingModel, px_per_ft: float = 15.0, stretch_x: float = 1.18, seed: int = 3,
-                photo: bool = False) -> bytes:
+                photo: bool = False, graph_paper: bool = False, furniture: bool = False) -> bytes:
     rng = np.random.default_rng(seed)
     floor = model.floors[0]
     xs = [p[0] for p in model.plot.polygon]
@@ -24,6 +24,11 @@ def draw_sketch(model: BuildingModel, px_per_ft: float = 15.0, stretch_x: float 
     W = int(w_ft * px_per_ft * stretch_x + 2 * margin)
     H = int(h_ft * px_per_ft + 2 * margin + 60)
     img = np.full((H, W, 3), (238, 240, 242), np.uint8)
+    if graph_paper:  # printed light-blue grid across the whole sheet
+        for v in range(0, W, 18):
+            cv2.line(img, (v, 0), (v, H), (225, 205, 185), 1)
+        for v in range(0, H, 18):
+            cv2.line(img, (0, v), (W, v), (225, 205, 185), 1)
 
     def P(x_mm: float, y_mm: float) -> tuple[float, float]:
         return (margin + x_mm / 304.8 * px_per_ft * stretch_x, margin + (max(ys) - y_mm) / 304.8 * px_per_ft)
@@ -55,6 +60,13 @@ def draw_sketch(model: BuildingModel, px_per_ft: float = 15.0, stretch_x: float 
             a = (wall.a[0] + ux * s0, wall.a[1] + uy * s0)
             b = (wall.a[0] + ux * s1, wall.a[1] + uy * s1)
             pen(P(*a), P(*b), 3 if wall.type == "exterior" else 2)
+
+    if furniture:  # furniture outlines in a fine pen, like most sketches
+        for f in floor.furniture:
+            w, d = f.size[0] if f.rot % 180 == 0 else f.size[1], f.size[1] if f.rot % 180 == 0 else f.size[0]
+            x0, y0 = P(f.pos[0] - w / 2, f.pos[1] + d / 2)
+            x1, y1 = P(f.pos[0] + w / 2, f.pos[1] - d / 2)
+            cv2.rectangle(img, (int(x0), int(y0)), (int(x1), int(y1)), INK, 1, cv2.LINE_AA)
 
     for room in floor.rooms:
         rx = [p[0] for p in room.polygon]

@@ -18,6 +18,7 @@ class Seg:
     b: float  # end
     thick: float = 0.0  # distance between the two pen lines of a double-line wall; 0 = single line
     partners: list[float] = field(default_factory=list)
+    pen: float = 0.0  # measured pen width in px (walls are usually drawn heavier than furniture)
 
     @property
     def length(self) -> float:
@@ -44,6 +45,7 @@ def find_strokes(mask: np.ndarray, text_polys: list[np.ndarray] = ()) -> Strokes
     m = cv2.dilate(mask, np.ones((3, 3), np.uint8))
 
     segs = _drop_lettering(_raw_segments(m, L), text_polys, L)
+    segs = _drop_page_edges(segs, mask.shape, L)
     segs = _merge_collinear(segs, tol=0.003 * L, gap=0.008 * L)
     stairs, segs = _split_stairs(segs, L)
     segs = _pair_double_lines(segs, lo=0.0035 * L, hi=0.02 * L)
@@ -52,7 +54,16 @@ def find_strokes(mask: np.ndarray, text_polys: list[np.ndarray] = ()) -> Strokes
     # otherwise it is the building itself. Strokes outside it are dimension arrows, the road, notes.
     rects = _closed_rects(segs, L)
     outer = rects[0] if rects else None
-    plot = outer if outer and any(_strictly_inside(r, outer, 0.02 * L) for r in rects[1:]) else None
+    # ...but only if that inner rectangle is house-sized (not a bed or a car), and the outer one is
+    # drawn as plain lines: an outline drawn as a double line is the house's own outer wall
+    def area(r):
+        return (r[2] - r[0]) * (r[3] - r[1])
+
+    plot = None
+    if outer and any(_strictly_inside(r, outer, 0.02 * L) and area(r) >= 0.3 * area(outer) for r in rects[1:]):
+        edge = [s for s in segs if _on_rect(s, outer, 0.012 * L) and s.length > 0.1 * L]
+        if sum(s.length for s in edge if s.thick) < 0.5 * max(1.0, sum(s.length for s in edge)):
+            plot = outer
     keep_in = plot or outer
     # an L-shaped or irregular house has no closed outer rectangle; the largest rectangle found is
     # then just one wing, and trimming to it would throw the rest of the house away
@@ -64,6 +75,8 @@ def find_strokes(mask: np.ndarray, text_polys: list[np.ndarray] = ()) -> Strokes
         walls = [s for s in segs if _within(s, keep_in, 0.012 * L) and not (plot and _on_rect(s, plot, 0.012 * L))]
     else:
         walls = list(segs)
+    _measure_pen(walls, mask, L)
+    walls = _drop_furniture(walls, L)
     others = [s for s in segs if s not in walls]
     style = "double" if sum(1 for s in walls if s.thick) >= 0.5 * max(1, len(walls)) else "single"
     return Strokes(walls=walls, plot=plot, stairs=stairs, style=style, others=others)
@@ -107,7 +120,100 @@ def _drop_lettering(segs: list[Seg], text_polys, L: int) -> list[Seg]:
                 best = max(best, (min(s.b, y1) - max(s.a, y0)) / s.length)
         return best
 
-    return [s for s in segs if s.length > 0.12 * L or inside_fraction(s) < 0.6]
+    def underlines(s: Seg) -> bool:
+        """A line drawn just under a title ("HOUSE PLAN - 18m x 25m")."""
+        if not s.horizontal:
+            return False
+        for x0, y0, x1, y1 in boxes:
+            h = y1 - y0
+            if y1 - 0.3 * h <= s.pos <= y1 + 0.8 * h and s.length <= 1.3 * (x1 - x0) and (min(s.b, x1) - max(s.a, x0)) >= 0.7 * s.length:
+                return True
+        return False
+
+    return [s for s in segs if (s.length > 0.12 * L or inside_fraction(s) < 0.6) and not underlines(s)]
+
+
+def _drop_page_edges(segs: list[Seg], shape, L: int) -> list[Seg]:
+    """The paper edge or the table behind it shows up as lines hugging the image border."""
+    H, W = shape[:2]
+    m = 0.012 * L
+    return [s for s in segs if not ((s.pos < m or s.pos > (H if s.horizontal else W) - m))]
+
+
+def _measure_pen(segs: list[Seg], mask: np.ndarray, L: int) -> None:
+    """Median count of ink pixels across the stroke, sampled along it (per pen line for double walls)."""
+    H, W = mask.shape
+    for s in segs:
+        half = int(s.thick / 2 + max(4, 0.006 * L))
+        samples = []
+        for t in np.linspace(s.a + 0.1 * s.length, s.b - 0.1 * s.length, 15):
+            if s.horizontal:
+                x, y = int(t), int(s.pos)
+                col = mask[max(0, y - half):min(H, y + half + 1), min(W - 1, max(0, x))]
+            else:
+                x, y = int(s.pos), int(t)
+                col = mask[min(H - 1, max(0, y)), max(0, x - half):min(W, x + half + 1)]
+            samples.append(int((col > 0).sum()))
+        s.pen = float(np.median(samples)) / (2 if s.thick else 1)
+
+
+def _drop_furniture(walls: list[Seg], L: int) -> list[Seg]:
+    """Beds, sofas, tables and cars are drawn with straight lines too. Two clues tell them apart:
+    walls are often drawn with a heavier pen, and walls join up into one network while furniture
+    floats inside rooms."""
+    singles = [s for s in walls if not s.thick]
+    if len(singles) >= 6:
+        split = _heavy_pen_split(singles)
+        if split is not None:
+            walls = [s for s in walls if s.thick or s.pen >= split]
+    # keep only strokes connected to the main wall network
+    n = len(walls)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    tol = 0.012 * L
+    for i in range(n):
+        for j in range(i + 1, n):
+            if _touch(walls[i], walls[j], tol):
+                parent[find(i)] = find(j)
+    size: dict[int, float] = {}
+    for i, s in enumerate(walls):
+        size[find(i)] = size.get(find(i), 0.0) + s.length
+    if not size:
+        return walls
+    biggest = max(size.values())
+    return [s for i, s in enumerate(walls) if size[find(i)] >= 0.12 * biggest]
+
+
+def _heavy_pen_split(segs: list[Seg]) -> float | None:
+    """Otsu threshold on pen width (weighted by length), if the drawing clearly uses two pens."""
+    pens = np.array([s.pen for s in segs])
+    weights = np.array([s.length for s in segs])
+    best, best_score = None, 0.0
+    for t in np.unique(pens)[1:]:
+        lo, hi = pens < t, pens >= t
+        wl, wh = weights[lo].sum(), weights[hi].sum()
+        if wl == 0 or wh == 0:
+            continue
+        ml, mh = np.average(pens[lo], weights=weights[lo]), np.average(pens[hi], weights=weights[hi])
+        score = wl * wh * (mh - ml) ** 2
+        if score > best_score:
+            best, best_score, means, share = t, score, (ml, mh), wh / weights.sum()
+    if best is None or means[1] < 1.6 * max(means[0], 1.0) or share < 0.25:
+        return None
+    return float(best)
+
+
+def _touch(p: Seg, q: Seg, tol: float) -> bool:
+    if p.horizontal == q.horizontal:
+        return abs(p.pos - q.pos) <= tol and p.a - tol <= q.b and q.a - tol <= p.b
+    h, v = (p, q) if p.horizontal else (q, p)
+    return h.a - tol <= v.pos <= h.b + tol and v.a - tol <= h.pos <= v.b + tol
 
 
 def _double_spacing(comp: np.ndarray) -> float:

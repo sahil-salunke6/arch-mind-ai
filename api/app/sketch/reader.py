@@ -292,6 +292,10 @@ def _solve(grid: _Grid, constraints: list[_C], scale: float) -> tuple[list[float
             if c.axis == axis:
                 add({c.j: 1, c.i: -1}, c.value, c.weight)
         sol, *_ = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)
+        # contradictory sizes can pull a station past its neighbour; keep the drawn order
+        sol = np.maximum.accumulate(sol + np.arange(n) * 1e-6)
+        for k in range(1, n):
+            sol[k] = max(sol[k], sol[k - 1] + 25.4)
         # whole inches read better than 11'-7.3"
         result.append([round(v / 25.4) * 25.4 for v in sol])
     return result[0], result[1]
@@ -358,6 +362,7 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         gx = float(np.interp(g.center[0], grid.x, X)) - ox
         gate = (round(max(0.0, gx - g.value[0] / 2), 1), g.value[0])
 
+    openings = _fit_openings(walls, openings)
     template = sample_project()
     model = BuildingModel(
         name=name, north_deg=SIDE_NORTH[road],
@@ -366,12 +371,13 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         floors=[Floor(walls=walls, openings=openings)],
         assemblies=template.assemblies,
     )
-    floor = model.floors[0]
-    rooms = detect_rooms(floor)
-
     # name rooms from the labels written inside them
     def to_mm(px: tuple[float, float]) -> tuple[float, float]:
         return float(np.interp(px[0], grid.x, X)) - ox, oy_bottom - float(np.interp(px[1], grid.y, Y))
+
+    floor = _merge_tiny_rooms(model.floors[0], [ShPoint(to_mm(lb.center)) for lb in labels if lb.role == "room"])
+    model = model.model_copy(update={"floors": [floor]})
+    rooms = detect_rooms(floor)
 
     named = 0
     stairs_mm = [ShPoint(to_mm(((r[0] + r[2]) / 2, (r[1] + r[3]) / 2))) for r in strokes.stairs]
@@ -380,7 +386,9 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         poly = Polygon(room.polygon)
         inside = [lb for lb in labels if lb.role == "room" and poly.contains(ShPoint(to_mm(lb.center)))]
         if inside:  # a written name wins; an open stair often shares its space with the hall
-            lb = inside[0]
+            # prefer a recognised room word over a guessed one, then the label nearest the middle
+            centre = poly.centroid
+            lb = min(inside, key=lambda lb: (lb.guessed, ShPoint(to_mm(lb.center)).distance(centre)))
             room.type, room.name, room.label_raw = lb.room_type, lb.room_name, lb.text
             named += 1
         elif any(poly.contains(p) for p in stairs_mm):
@@ -402,6 +410,58 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
     if missing:
         warnings.append(f"Could not find closed walls around: {', '.join(missing)}. Draw the missing walls in the editor.")
     return model.model_copy(update={"floors": [floor.model_copy(update={"rooms": rooms})]}), named
+
+
+def _fit_openings(walls: list[Wall], openings: list[Opening]) -> list[Opening]:
+    """Last guard before validation: clamp each opening onto its wall, drop the ones that can't fit."""
+    lengths = {w.id: w.length for w in walls}
+    out = []
+    for o in openings:
+        length = lengths.get(o.wall, 0.0)
+        width = min(o.width, length - 50)
+        if width < 450:
+            continue
+        out.append(o.model_copy(update={"width": width, "offset": min(max(0.0, o.offset), length - width)}))
+    return out
+
+
+TINY_AREA = 1.4e6  # mm²: ~15 sq ft
+TINY_SIDE = 800  # mm
+
+
+def _merge_tiny_rooms(floor: Floor, label_points: list[ShPoint]) -> Floor:
+    """Fixtures and furniture leave little closed loops (a wardrobe, a WC, a car outline). Remove the
+    short wall that closes each unlabelled tiny room so it joins its neighbour."""
+    from shapely.geometry import LineString
+
+    for _ in range(60):
+        rooms = detect_rooms(floor.model_copy(update={"rooms": []}))
+        victim = None
+        for room in sorted(rooms, key=lambda r: r.area):
+            poly = Polygon(room.polygon)
+            x0, y0, x1, y1 = poly.bounds
+            tiny = poly.area < TINY_AREA or min(x1 - x0, y1 - y0) < TINY_SIDE
+            if not tiny or any(poly.contains(p) for p in label_points):
+                continue
+            edge = poly.exterior
+            candidates = []
+            for w in floor.walls:
+                if w.type == "exterior":
+                    continue
+                line = LineString([w.a, w.b])
+                shared = edge.intersection(line.buffer(5)).length
+                if shared > 0.3 * line.length and line.length <= max(2500.0, 1.5 * max(x1 - x0, y1 - y0)):
+                    candidates.append((line.length, w.id))
+            if candidates:
+                victim = min(candidates)[1]
+                break
+        if victim is None:
+            return floor
+        floor = floor.model_copy(update={
+            "walls": [w for w in floor.walls if w.id != victim],
+            "openings": [o for o in floor.openings if o.wall != victim],
+        })
+    return floor
 
 
 def _merge_runs(runs: list[tuple[int, int, float]]) -> list[tuple[int, int]]:
