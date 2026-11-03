@@ -91,8 +91,11 @@ export type Tool = "select" | "wall" | "door" | "window";
 export type ViewName = "North" | "South" | "East" | "West" | "NE" | "NW" | "SE" | "SW" | "Top" | "Bottom";
 export const VIEWS: ViewName[] = ["North", "South", "East", "West", "NE", "NW", "SE", "SW", "Top", "Bottom"];
 
+/** How much of the house the 3D view shows: auto picks roof for straight-on elevations, open otherwise. */
+export type Cut = "auto" | "roof" | "open" | "doll";
+
 export interface Layers {
-  roof: boolean;
+  cut: Cut;
   furniture: boolean;
   labels: boolean;
   dimensions: boolean;

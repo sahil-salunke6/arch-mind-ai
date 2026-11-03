@@ -32,7 +32,7 @@ export default function App() {
   const [layout, setLayout] = useState<Layout>("Compare");
   const [view, setView] = useState<ViewName>("NE");
   const [mode, setMode] = useState<"2d" | "3d">("3d");
-  const [layers, setLayers] = useState<Layers>({ roof: false, furniture: true, labels: true, dimensions: true });
+  const [layers, setLayers] = useState<Layers>({ cut: "auto", furniture: true, labels: true, dimensions: true });
   const [rawSelection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
@@ -162,9 +162,6 @@ export default function App() {
 
   const pickView = (v: ViewName) => {
     setView(v);
-    // Top reads best as a cutaway, elevations need the roof; corner views keep the user's choice.
-    if (v === "Top") setLayers((l) => ({ ...l, roof: false }));
-    else if (["North", "South", "East", "West"].includes(v)) setLayers((l) => ({ ...l, roof: true }));
     if (layout === "2D Plan") setLayout("3D Model");
   };
 
@@ -265,6 +262,7 @@ export default function App() {
             )}
             {show3D && (
               <Card title={`3D Model · ${view} view`} accent onExpand={layout === "Compare" ? () => setLayout("3D Model") : undefined}>
+                <CutControl value={layers.cut} onChange={(cut) => setLayers((l) => ({ ...l, cut }))} />
                 <Viewer3D
                   model={model} layers={layers} view={view} mode={mode}
                   selectedWall={selection?.kind === "wall" ? selection.id : null}
@@ -317,6 +315,26 @@ export default function App() {
           </p>
         </div>
       </main>
+    </div>
+  );
+}
+
+const CUTS: { value: Layers["cut"]; label: string; hint: string }[] = [
+  { value: "auto", label: "Auto", hint: "Roof on straight-on elevations, open from above and the corners" },
+  { value: "roof", label: "Roof", hint: "Closed house with roof and parapet" },
+  { value: "open", label: "Cutaway", hint: "Roof removed, full-height walls" },
+  { value: "doll", label: "Doll-house", hint: "Walls cut at 4 ft to see into every room" },
+];
+
+function CutControl({ value, onChange }: { value: Layers["cut"]; onChange: (v: Layers["cut"]) => void }) {
+  return (
+    <div className="absolute top-2 right-2 z-10 flex rounded-lg border border-slate-200 bg-white/95 p-0.5 text-[11px] font-medium shadow-sm" role="radiogroup" aria-label="3D view">
+      {CUTS.map((c) => (
+        <button key={c.value} role="radio" aria-checked={value === c.value} title={c.hint} onClick={() => onChange(c.value)}
+          className={`rounded-md px-2 py-1 ${value === c.value ? "bg-brand-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>
+          {c.label}
+        </button>
+      ))}
     </div>
   );
 }
