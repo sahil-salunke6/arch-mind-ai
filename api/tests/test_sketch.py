@@ -106,3 +106,24 @@ def test_sketch_endpoint_creates_project(tmp_path, monkeypatch):
 
     bad = client.post("/api/sketch", content=b"not an image", headers={"Content-Type": "image/png"})
     assert bad.status_code == 422
+
+
+def test_fragment_cleanup_never_merges_labelled_rooms():
+    from shapely.geometry import Point
+    from app.model import Floor, Wall
+    from app.rooms import detect_rooms
+    from app.sketch.reader import _merge_tiny_rooms
+
+    def w(i, a, b, kind="interior"):
+        return Wall(id=f"W{i}", a=a, b=b, thickness=115, type=kind)
+
+    # 6 m x 3 m: two 3 m rooms split by a short wall at x=3000, and a 0.6 m wardrobe loop in the right one
+    walls = [w(1, (0, 0), (6000, 0), "exterior"), w(2, (6000, 0), (6000, 3000), "exterior"),
+             w(3, (6000, 3000), (0, 3000), "exterior"), w(4, (0, 3000), (0, 0), "exterior"),
+             w(5, (3000, 0), (3000, 3000)), w(6, (5400, 0), (5400, 1200)), w(7, (5400, 1200), (6000, 1200))]
+    labels = [Point(1500, 1500), Point(4200, 2000)]
+    floor = _merge_tiny_rooms(Floor(walls=walls), labels)
+    ids = {x.id for x in floor.walls}
+    assert "W5" in ids  # the wall between the two labelled rooms survives
+    assert not {"W6", "W7"} <= ids  # the wardrobe loop was opened up
+    assert len(detect_rooms(floor)) == 2

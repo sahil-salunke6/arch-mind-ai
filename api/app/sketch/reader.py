@@ -390,6 +390,12 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
             centre = poly.centroid
             lb = min(inside, key=lambda lb: (lb.guessed, ShPoint(to_mm(lb.center)).distance(centre)))
             room.type, room.name, room.label_raw = lb.room_type, lb.room_name, lb.text
+            # an open-plan space labelled in several places ("Open Kitchen", "Dining", "Living Hall")
+            known = list(dict.fromkeys(x.room_name for x in sorted(inside, key=lambda x: x.center[1]) if not x.guessed))
+            if len(known) >= 2:
+                types = {x.room_type for x in inside if not x.guessed}
+                room.name = " / ".join(known[:3])
+                room.type = next((t for t in ("living", "kitchen", "dining") if t in types), room.type)
             named += 1
         elif any(poly.contains(p) for p in stairs_mm):
             room.type, room.name = "stair", "Staircase"
@@ -431,36 +437,48 @@ TINY_SIDE = 800  # mm
 
 def _merge_tiny_rooms(floor: Floor, label_points: list[ShPoint]) -> Floor:
     """Fixtures and furniture leave little closed loops (a wardrobe, a WC, a car outline). Remove the
-    short wall that closes each unlabelled tiny room so it joins its neighbour."""
+    short wall that closes each unlabelled tiny room so it joins its neighbour, but never a wall whose
+    removal would run two labelled rooms together."""
     from shapely.geometry import LineString
 
-    for _ in range(60):
+    def labelled_rooms(f: Floor) -> int:
+        polys = [Polygon(r.polygon) for r in detect_rooms(f.model_copy(update={"rooms": []}))]
+        return sum(any(poly.contains(p) for p in label_points) for poly in polys)
+
+    def without(f: Floor, wall_id: str) -> Floor:
+        return f.model_copy(update={"walls": [w for w in f.walls if w.id != wall_id],
+                                    "openings": [o for o in f.openings if o.wall != wall_id]})
+
+    skipped: set[tuple[int, int]] = set()
+    baseline = labelled_rooms(floor)
+    for _ in range(80):
         rooms = detect_rooms(floor.model_copy(update={"rooms": []}))
-        victim = None
+        changed = False
         for room in sorted(rooms, key=lambda r: r.area):
             poly = Polygon(room.polygon)
+            key = (round(poly.centroid.x / 100), round(poly.centroid.y / 100))
             x0, y0, x1, y1 = poly.bounds
             tiny = poly.area < TINY_AREA or min(x1 - x0, y1 - y0) < TINY_SIDE
-            if not tiny or any(poly.contains(p) for p in label_points):
+            if not tiny or key in skipped or any(poly.contains(p) for p in label_points):
                 continue
-            edge = poly.exterior
             candidates = []
             for w in floor.walls:
                 if w.type == "exterior":
                     continue
                 line = LineString([w.a, w.b])
-                shared = edge.intersection(line.buffer(5)).length
+                shared = poly.exterior.intersection(line.buffer(5)).length
                 if shared > 0.3 * line.length and line.length <= max(2500.0, 1.5 * max(x1 - x0, y1 - y0)):
                     candidates.append((line.length, w.id))
-            if candidates:
-                victim = min(candidates)[1]
+            for _, wall_id in sorted(candidates):
+                trial = without(floor, wall_id)
+                if labelled_rooms(trial) >= baseline:
+                    floor, changed = trial, True
+                    break
+            if changed:
                 break
-        if victim is None:
+            skipped.add(key)
+        if not changed:
             return floor
-        floor = floor.model_copy(update={
-            "walls": [w for w in floor.walls if w.id != victim],
-            "openings": [o for o in floor.openings if o.wall != victim],
-        })
     return floor
 
 
