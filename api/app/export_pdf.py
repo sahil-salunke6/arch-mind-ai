@@ -6,7 +6,7 @@ from math import atan2, degrees, radians, sin, cos
 
 from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.units import mm
-from reportlab.pdfgen.canvas import Canvas
+from reportlab.pdfgen.canvas import FILL_EVEN_ODD, Canvas
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
@@ -90,6 +90,17 @@ class View:
             path.lineTo(*self.p(*pt))
         path.close()
         self.c.drawPath(path, stroke=stroke, fill=fill)
+
+    def poly_with_holes(self, poly: Polygon):
+        """Walls enclosing a room without a door form a ring; its hole must stay unfilled."""
+        path = self.c.beginPath()
+        for ring in [poly.exterior, *poly.interiors]:
+            pts = list(ring.coords)[:-1]
+            path.moveTo(*self.p(*pts[0]))
+            for pt in pts[1:]:
+                path.lineTo(*self.p(*pt))
+            path.close()
+        self.c.drawPath(path, stroke=1, fill=1, fillMode=FILL_EVEN_ODD)
 
     def rect(self, x0, y0, x1, y1, stroke=1, fill=0):
         self.poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], stroke, fill)
@@ -306,7 +317,7 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
     solids = unary_union([Polygon(span_rect(w, s0, s1)) for w in floor.walls for s0, s1 in solid_spans(w, floor.openings)])
     _style(c, 0.6, fill=(0.17, 0.16, 0.22))
     for poly in getattr(solids, "geoms", [solids]):
-        v.poly(list(poly.exterior.coords)[:-1], stroke=1, fill=1)
+        v.poly_with_holes(poly)
 
     # openings
     fx0, fy0, fx1, fy1 = footprint(floor)

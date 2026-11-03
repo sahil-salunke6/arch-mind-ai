@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  BedDouble, Building2, Car, Compass, FilePlus2, Frame, ImagePlus, Info, Layers, Ruler, ShowerHead, Sparkles, SquareDashed, Trash2,
+  AlertTriangle, BedDouble, Building2, Car, CheckCircle2, Compass, FilePlus2, Frame, ImagePlus, Info, Layers, Loader2, Ruler, ShowerHead,
+  Sparkles, SquareDashed, Trash2,
 } from "lucide-react";
-import type { ProjectInfo } from "../lib/api";
+import type { ProjectInfo, SketchReport } from "../lib/api";
 import type { BuildingModel, Layers as LayerState, Opening, RoomType, Selection, Side } from "../types";
 import { ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
 import {
@@ -31,6 +32,7 @@ function Tabs<T extends string>({ tabs, value, onChange }: { tabs: T[]; value: T
 export interface Upload {
   name: string;
   url: string;
+  file: File;
 }
 
 export function LeftPanel(props: {
@@ -45,6 +47,8 @@ export function LeftPanel(props: {
   current: string | null;
   onOpen: (id: string) => void;
   onNew: (kind: "blank" | "sample") => void;
+  reading: boolean;
+  report: SketchReport | null;
 }) {
   const [tab, setTab] = useState<"Input" | "Projects">("Input");
   return (
@@ -90,12 +94,19 @@ export function LeftPanel(props: {
               <Info size={15} className="mt-0.5 shrink-0" /> {props.notice}
             </p>
           )}
+          {props.report && <ReadReport report={props.report} />}
           <button
             onClick={props.onGenerate}
-            className="mt-auto flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 py-3 font-semibold text-white shadow-md shadow-brand-500/30 hover:brightness-110"
+            disabled={props.reading}
+            className="mt-auto flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-brand-600 to-brand-500 py-3 font-semibold text-white shadow-md shadow-brand-500/30 hover:brightness-110 disabled:cursor-wait disabled:opacity-70"
           >
-            Generate Design <Sparkles size={17} />
+            {props.reading ? <><Loader2 size={17} className="animate-spin" /> Reading your sketch…</> : <>Generate Design <Sparkles size={17} /></>}
           </button>
+          {!props.upload && !props.report && (
+            <p className="text-[11px] leading-4 text-slate-500">
+              Tips: plain paper, dark pen, whole page in the photo, and write the size of every room (12&apos; x 14&apos;) and of the plot.
+            </p>
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-3 p-3">
@@ -123,6 +134,28 @@ export function LeftPanel(props: {
         </div>
       )}
     </aside>
+  );
+}
+
+function ReadReport({ report }: { report: SketchReport }) {
+  const s = report.stats;
+  return (
+    <div className="space-y-2 rounded-xl border border-slate-200 p-3 text-xs">
+      <p className="flex items-center gap-1.5 font-semibold text-emerald-700">
+        <CheckCircle2 size={15} /> Read {s.walls} walls, {s.rooms} rooms and {s.sizes_used} sizes
+      </p>
+      {report.warnings.length > 0 && (
+        <>
+          <p className="flex items-center gap-1.5 font-semibold text-amber-800">
+            <AlertTriangle size={14} /> Please check ({report.warnings.length})
+          </p>
+          <ul className="max-h-40 list-disc space-y-1 overflow-y-auto pl-4 text-slate-700">
+            {report.warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </>
+      )}
+      <p className="text-slate-500">Fix anything that is off in the 2D plan: drag walls, or click one to type its length.</p>
+    </div>
   );
 }
 
