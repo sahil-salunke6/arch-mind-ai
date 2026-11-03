@@ -130,6 +130,8 @@ class BuildingModel(BaseModel):
     floors: list[Floor]
     roof: Roof = Roof()
     assemblies: dict[str, Assembly] = {}
+    # chosen construction options, e.g. {"wall.exterior.masonry": "aac_block", "room.R-bed1.floor": "vitrified"}
+    specs: dict[str, str] = {}
 
     @model_validator(mode="after")
     def _check_openings(self) -> "BuildingModel":

@@ -83,6 +83,8 @@ export interface BuildingModel {
   floors: Floor[];
   roof: { type: string; parapet: number };
   assemblies: Record<string, Assembly>;
+  /** Chosen construction options, keyed by part, e.g. "wall.exterior.masonry" → "aac_block". */
+  specs?: Record<string, string>;
 }
 
 export type Selection = { kind: "wall" | "opening" | "room" | "furniture"; id: string } | null;

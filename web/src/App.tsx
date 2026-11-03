@@ -9,6 +9,7 @@ import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
 import SketchView from "./components/SketchView";
 import Viewer3D from "./components/Viewer3D";
+import CloseUp, { type CloseUpTarget } from "./components/CloseUp";
 
 type Layout = "Compare" | "2D Plan" | "3D Model";
 
@@ -35,6 +36,8 @@ export default function App() {
   const [layers, setLayers] = useState<Layers>({ cut: "auto", furniture: true, labels: true, dimensions: true });
   const [rawSelection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>("select");
+  const [closeUp, setCloseUp] = useState<CloseUpTarget | null>(null);
+  const openCloseUp = (t: CloseUpTarget) => { setCloseUp(t); setLayout("3D Model"); };
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [thumbs, setThumbs] = useState<Partial<Record<ViewName, string>>>({});
 
@@ -262,6 +265,7 @@ export default function App() {
             )}
             {show3D && (
               <Card title={`3D Model · ${view} view`} accent onExpand={layout === "Compare" ? () => setLayout("3D Model") : undefined}>
+                {closeUp && <CloseUp model={model} target={closeUp} onEdit={(m) => edit(m)} onClose={() => setCloseUp(null)} />}
                 <CutControl value={layers.cut} onChange={(cut) => setLayers((l) => ({ ...l, cut }))} />
                 <Viewer3D
                   model={model} layers={layers} view={view} mode={mode}
@@ -300,7 +304,7 @@ export default function App() {
         <div className="lg:col-span-2 xl:col-span-1">
           <RightPanel
             model={model} layers={layers} onLayers={setLayers}
-            selection={selection} onSelect={setSelection} onEdit={edit}
+            selection={selection} onSelect={setSelection} onEdit={edit} onCloseUp={openCloseUp}
             footer={
               <DownloadMenu items={[
                 { label: "Blueprint set (.pdf, A3)", onClick: () => projectId && exportFile(api.pdfUrl(projectId), `${model.name}.pdf`) },
