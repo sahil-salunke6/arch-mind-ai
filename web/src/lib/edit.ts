@@ -147,3 +147,39 @@ export function addOuterWalls(model: BuildingModel): BuildingModel {
   for (let i = 0; i < 4; i++) [m] = addWall(m, corners[i], corners[(i + 1) % 4], "exterior");
   return m;
 }
+
+// --- furniture ---------------------------------------------------------------------------------
+
+/** Footprint and height in feet for each furniture type the plan and 3D view can draw. */
+export const FURNITURE: Record<string, { label: string; size: [number, number, number] }> = {
+  bed_double: { label: "Double bed", size: [5, 6.5, 1.8] },
+  bed_single: { label: "Single bed", size: [3, 6.5, 1.8] },
+  wardrobe: { label: "Wardrobe", size: [5, 2, 7] },
+  sofa: { label: "Sofa", size: [7, 3, 2.8] },
+  coffee_table: { label: "Coffee table", size: [3.5, 2, 1.4] },
+  tv_unit: { label: "TV unit", size: [6, 1.5, 2] },
+  dining_table: { label: "Dining table", size: [6, 3.5, 2.5] },
+  chair: { label: "Chair", size: [1.5, 1.5, 3] },
+  kitchen_counter: { label: "Kitchen counter", size: [8, 2, 3] },
+  wc: { label: "WC", size: [1.5, 2.2, 1.3] },
+  car: { label: "Car", size: [6, 14, 4.8] },
+};
+
+export function addFurniture(model: BuildingModel, type: string, pos: Point): [BuildingModel, string] {
+  const id = nextId("F-", model.floors[0].furniture.map((f) => f.id));
+  const [w, d, h] = FURNITURE[type].size.map((v) => v * MM_PER_FT) as [number, number, number];
+  return [withFloor(model, (f) => ({ ...f, furniture: [...f.furniture, { id, type, pos, rot: 0, size: [w, d, h] }] })), id];
+}
+
+export function updateFurniture(model: BuildingModel, id: string, patch: Partial<Floor["furniture"][number]>) {
+  return withFloor(model, (f) => ({ ...f, furniture: f.furniture.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
+}
+
+export function rotateFurniture(model: BuildingModel, id: string, by: number) {
+  const item = model.floors[0].furniture.find((x) => x.id === id)!;
+  return updateFurniture(model, id, { rot: (((item.rot + by) % 360) + 360) % 360 });
+}
+
+export function deleteFurniture(model: BuildingModel, id: string) {
+  return withFloor(model, (f) => ({ ...f, furniture: f.furniture.filter((x) => x.id !== id) }));
+}

@@ -142,3 +142,15 @@ def test_room_names_are_unique_even_with_duplicate_input():
     halves = [[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], [(4000, 0), (8000, 0), (8000, 3000), (4000, 3000)]]
     same = [Room(id=f"R-{i}", name="Bedroom", type="bedroom", polygon=p) for i, p in enumerate(halves)]
     assert sorted(r.name for r in detect_rooms(Floor(walls=walls, rooms=same))) == ["Bedroom", "Bedroom (2)"]
+
+
+def test_rename_and_delete_project(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "store", ProjectStore(tmp_path / "t.db"))
+    client = TestClient(main.app)
+    pid = client.post("/api/projects").json()["id"]
+    assert client.patch(f"/api/projects/{pid}", json={"name": "  Villa  "}).json()["name"] == "Villa"
+    assert client.get(f"/api/projects/{pid}").json()["name"] == "Villa"
+    assert client.patch(f"/api/projects/{pid}", json={"name": " "}).status_code == 422
+    assert client.delete(f"/api/projects/{pid}").status_code == 204
+    assert client.get(f"/api/projects/{pid}").status_code == 404
+    assert client.delete(f"/api/projects/{pid}").status_code == 404

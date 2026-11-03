@@ -79,7 +79,7 @@ export interface BuildingModel {
   assemblies: Record<string, Assembly>;
 }
 
-export type Selection = { kind: "wall" | "opening" | "room"; id: string } | null;
+export type Selection = { kind: "wall" | "opening" | "room" | "furniture"; id: string } | null;
 export type Tool = "select" | "wall" | "door" | "window";
 
 export type ViewName = "North" | "South" | "East" | "West" | "NE" | "NW" | "SE" | "SW" | "Top" | "Bottom";

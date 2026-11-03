@@ -21,6 +21,7 @@ npm run dev
 ```
 
 Tests: `cd api && .venv/Scripts/python -m pytest`. Typecheck: `cd web && npm run typecheck`.
+GitHub Actions (`.github/workflows/ci.yml`) runs both on every pull request into `dev` or `main`.
 
 ## Reading a hand-drawn sketch
 
@@ -50,7 +51,11 @@ In the 2D plan, choose a tool from the toolbar (keyboard shortcut in brackets):
 - **Wall (W)**: click to start, click for each corner; walls snap to 90°, to other walls and to 3" steps.
   Click the start point or double-click to finish, Esc to stop, hold Shift for any angle.
 - **Door (D) / Window (N)**: click on a wall.
-- Delete removes the selected wall/opening; Ctrl+Z / Ctrl+Y undo and redo.
+- **Furniture**: click a piece to select it, drag to move it; R turns it 90° (Shift+R the other way).
+  Add furniture to a room from the room's panel (select the room, then *Add furniture*).
+- Delete removes the selected wall, opening or furniture; Ctrl+Z / Ctrl+Y undo and redo.
+
+Projects can be renamed and deleted from the **Projects** tab (pencil and bin icons).
 
 Changes autosave. On save the API re-derives rooms from closed wall loops (`api/app/rooms.py`), keeping
 the names of rooms you already labelled. A blank plot starts from **Projects → Blank plot**.

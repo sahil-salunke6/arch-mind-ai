@@ -52,6 +52,14 @@ class ProjectStore:
             self._insert(conn, id, model)
         return id
 
+    def delete(self, id: str) -> bool:
+        with _connect(self.path) as conn:
+            return conn.execute("DELETE FROM projects WHERE id = ?", (id,)).rowcount == 1
+
+    def rename(self, id: str, name: str) -> bool:
+        model = self.get(id)
+        return model is not None and self.save(id, model.model_copy(update={"name": name}))
+
     def save(self, id: str, model: BuildingModel) -> bool:
         with _connect(self.path) as conn:
             cur = conn.execute(

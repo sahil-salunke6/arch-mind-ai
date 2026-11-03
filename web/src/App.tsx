@@ -3,7 +3,7 @@ import { Box as BoxIcon, Maximize2, SquareDashed } from "lucide-react";
 import { api, type ProjectInfo, type SketchReport } from "./lib/api";
 import { VIEWS, type BuildingModel, type Layers, type Selection, type Tool, type ViewName } from "./types";
 import { DownloadMenu, Stepper, TopNav, type SaveStatus } from "./components/Chrome";
-import { blankProject, deleteOpening, deleteWall } from "./lib/edit";
+import { blankProject, deleteFurniture, deleteOpening, deleteWall, rotateFurniture } from "./lib/edit";
 import { useHistory } from "./lib/history";
 import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
@@ -105,7 +105,7 @@ export default function App() {
   const selection = useMemo<Selection>(() => {
     if (!rawSelection || !model) return null;
     const f = model.floors[0];
-    const list = { wall: f.walls, opening: f.openings, room: f.rooms }[rawSelection.kind];
+    const list: { id: string }[] = { wall: f.walls, opening: f.openings, room: f.rooms, furniture: f.furniture }[rawSelection.kind];
     return list.some((x) => x.id === rawSelection.id) ? rawSelection : null;
   }, [rawSelection, model]);
 
@@ -118,6 +118,9 @@ export default function App() {
       else if ((e.key === "Delete" || e.key === "Backspace") && selection && model) {
         if (selection.kind === "wall") edit(deleteWall(model, selection.id));
         if (selection.kind === "opening") edit(deleteOpening(model, selection.id));
+        if (selection.kind === "furniture") edit(deleteFurniture(model, selection.id));
+      } else if (!mod && e.key.toLowerCase() === "r" && selection?.kind === "furniture" && model) {
+        edit(rotateFurniture(model, selection.id, e.shiftKey ? -90 : 90));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -130,6 +133,31 @@ export default function App() {
     await refreshList();
     await open(id);
     if (kind === "blank") { setLayout("2D Plan"); setTool("wall"); }
+  };
+
+  const renameProject = async (id: string, name: string) => {
+    try {
+      if (id === projectId && model) edit({ ...model, name });  // saved with the next autosave
+      else await api.rename(id, name);
+      setProjects((list) => list.map((p) => (p.id === id ? { ...p, name } : p)));
+    } catch (e) {
+      window.alert(`Couldn't rename the project: ${(e as Error).message}`);
+    }
+  };
+
+  const deleteProject = async (id: string) => {
+    try {
+      await api.remove(id);
+    } catch (e) {
+      window.alert(`Couldn't delete the project: ${(e as Error).message}`);
+      return;
+    }
+    setReports(({ [id]: _, ...rest }) => rest);
+    const list = await api.list();
+    setProjects(list);
+    if (id !== projectId) return;
+    if (list[0]) await open(list[0].id);
+    else { const { id: fresh } = await api.createFromSample(); await refreshList(); await open(fresh); }
   };
 
   const pickView = (v: ViewName) => {
@@ -205,6 +233,7 @@ export default function App() {
           prompt={prompt} onPrompt={setPrompt} onGenerate={onGenerate} notice={notice}
           reading={reading} report={projectId ? reports[projectId] ?? null : null}
           projects={projects} current={projectId} onOpen={open} onNew={newProject}
+          onRename={renameProject} onDelete={deleteProject}
         />
 
         <section className="flex min-w-0 flex-col gap-3">

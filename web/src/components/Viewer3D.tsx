@@ -229,6 +229,7 @@ function FurnitureMesh({ model, f }: { model: BuildingModel; f: Furniture }) {
 
   let body: ReactNode;
   switch (f.type) {
+    case "bed_single":
     case "bed_double":
       body = [
         part(0, 0, 0, w, d, 300, "#9b7350", 1), part(0, 0, 300, w - 60, d - 60, 220, "#fbfbfd", 2),

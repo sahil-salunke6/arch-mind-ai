@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   AlertTriangle, BedDouble, Building2, Car, CheckCircle2, Compass, FilePlus2, Frame, ImagePlus, Info, Layers, Loader2, Ruler, ShowerHead,
-  Sparkles, SquareDashed, Trash2,
+  Pencil, RotateCcw, RotateCw, Sparkles, SquareDashed, Trash2,
 } from "lucide-react";
 import type { ProjectInfo, SketchReport } from "../lib/api";
 import type { BuildingModel, Layers as LayerState, Opening, RoomType, Selection, Side } from "../types";
-import { ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
+import { centroid, ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
 import {
-  deleteOpening, deleteWall, setPlotSize, setRoadSide, setWallLength, setWallType, updateOpening, updateRoom,
+  addFurniture, deleteFurniture, deleteOpening, deleteWall, FURNITURE, rotateFurniture, setPlotSize, setRoadSide, setWallLength,
+  setWallType, updateOpening, updateRoom,
 } from "../lib/edit";
 import { parseLength, parseSize } from "../lib/units";
 
@@ -47,6 +48,8 @@ export function LeftPanel(props: {
   current: string | null;
   onOpen: (id: string) => void;
   onNew: (kind: "blank" | "sample") => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
   reading: boolean;
   report: SketchReport | null;
 }) {
@@ -120,20 +123,49 @@ export function LeftPanel(props: {
           </div>
           <ul className="flex flex-col gap-1">
             {props.projects.map((p) => (
-              <li key={p.id}>
-                <button
-                  onClick={() => props.onOpen(p.id)}
-                  className={`w-full rounded-lg px-3 py-2.5 text-left text-sm ${p.id === props.current ? "bg-brand-50 font-semibold text-brand-700" : "hover:bg-slate-50"}`}
-                >
-                  {p.name}
-                  <span className="block text-xs font-normal text-slate-500">{new Date(p.updated_at).toLocaleString()}</span>
-                </button>
-              </li>
+              <ProjectRow key={p.id} project={p} current={p.id === props.current}
+                onOpen={() => props.onOpen(p.id)} onRename={(n) => props.onRename(p.id, n)} onDelete={() => props.onDelete(p.id)} />
             ))}
           </ul>
         </div>
       )}
     </aside>
+  );
+}
+
+function ProjectRow({ project, current, onOpen, onRename, onDelete }: {
+  project: ProjectInfo; current: boolean; onOpen: () => void; onRename: (name: string) => void; onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(project.name);
+  useEffect(() => setName(project.name), [project.name]);
+  const commit = () => {
+    setEditing(false);
+    if (name.trim() && name.trim() !== project.name) onRename(name.trim());
+    else setName(project.name);
+  };
+  return (
+    <li className={`group flex items-center gap-1 rounded-lg pr-1 ${current ? "bg-brand-50" : "hover:bg-slate-50"}`}>
+      {editing ? (
+        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onBlur={commit} aria-label="Project name"
+          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setName(project.name); setEditing(false); } }}
+          className="m-1.5 min-w-0 flex-1 rounded-md border border-brand-300 px-2 py-1.5 text-sm outline-none" />
+      ) : (
+        <button onClick={onOpen} className={`min-w-0 flex-1 px-3 py-2.5 text-left text-sm ${current ? "font-semibold text-brand-700" : ""}`}>
+          <span className="block truncate">{project.name}</span>
+          <span className="block text-xs font-normal text-slate-500">{new Date(project.updated_at).toLocaleString()}</span>
+        </button>
+      )}
+      {!editing && (
+        <span className="flex opacity-60 group-hover:opacity-100 focus-within:opacity-100">
+          <button title="Rename" aria-label={`Rename ${project.name}`} onClick={() => setEditing(true)}
+            className="grid size-7 place-items-center rounded-md text-slate-500 hover:bg-white hover:text-brand-700"><Pencil size={14} /></button>
+          <button title="Delete" aria-label={`Delete ${project.name}`}
+            onClick={() => { if (window.confirm(`Delete "${project.name}"? This can't be undone.`)) onDelete(); }}
+            className="grid size-7 place-items-center rounded-md text-slate-500 hover:bg-white hover:text-red-600"><Trash2 size={14} /></button>
+        </span>
+      )}
+    </li>
   );
 }
 
@@ -181,6 +213,7 @@ export function RightPanel(props: {
   const wall = selection?.kind === "wall" ? floor.walls.find((w) => w.id === selection.id) : undefined;
   const opening = selection?.kind === "opening" ? floor.openings.find((o) => o.id === selection.id) : undefined;
   const room = selection?.kind === "room" ? floor.rooms.find((r) => r.id === selection.id) : undefined;
+  const item = selection?.kind === "furniture" ? floor.furniture.find((f) => f.id === selection.id) : undefined;
   const back = <button onClick={() => props.onSelect(null)} className="text-xs text-brand-700 hover:underline">Back to summary</button>;
 
   return (
@@ -229,6 +262,28 @@ export function RightPanel(props: {
           </>
         )}
 
+        {tab === "Details" && item && (
+          <>
+            <Header title={`Selected ${FURNITURE[item.type]?.label ?? "Furniture"}`} action={back} />
+            <div className="space-y-3 rounded-xl border border-slate-100 p-3">
+              <dl className="grid grid-cols-2 gap-y-1.5 text-sm">
+                <dt className="text-slate-500">Size</dt><dd className="text-right">{ftIn(item.size[0])} × {ftIn(item.size[1])}</dd>
+                <dt className="text-slate-500">Turned</dt><dd className="text-right">{Math.round(item.rot)}°</dd>
+              </dl>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => onEdit(rotateFurniture(model, item.id, 90))} className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 py-2 text-sm font-medium hover:bg-slate-50">
+                  <RotateCcw size={15} /> Turn left
+                </button>
+                <button onClick={() => onEdit(rotateFurniture(model, item.id, -90))} className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 py-2 text-sm font-medium hover:bg-slate-50">
+                  <RotateCw size={15} /> Turn right
+                </button>
+              </div>
+              <DeleteButton label="Remove" onClick={() => { onEdit(deleteFurniture(model, item.id)); props.onSelect(null); }} />
+              <p className="text-xs text-slate-500">Drag it in the plan to move it. Shortcut: R turns it, Delete removes it.</p>
+            </div>
+          </>
+        )}
+
         {tab === "Details" && room && (
           <>
             <Header title="Selected Room" action={back} />
@@ -241,6 +296,18 @@ export function RightPanel(props: {
                 <dt className="text-slate-500">Size</dt><dd className="text-right">{roomSize(room)}</dd>
                 <dt className="text-slate-500">Area</dt><dd className="text-right">{Math.round(sqft(polygonArea(room.polygon)))} sq ft</dd>
               </dl>
+              <Field label="Add furniture">
+                <select value="" aria-label="Add furniture" className="max-w-44 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm"
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    const [next, id] = addFurniture(model, e.target.value, centroid(room.polygon));
+                    onEdit(next);
+                    props.onSelect({ kind: "furniture", id });
+                  }}>
+                  <option value="">Choose…</option>
+                  {Object.entries(FURNITURE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select>
+              </Field>
               <p className="text-xs text-slate-500">Rooms come from closed loops of walls; move the walls to resize the room.</p>
             </div>
           </>
