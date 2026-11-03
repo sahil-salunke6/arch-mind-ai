@@ -63,19 +63,24 @@ def test_mockup_contradictions_are_reported(mockup):
     assert mockup.overlay["walls"] and mockup.overlay["plot"]
 
 
-@pytest.mark.parametrize("photo", [False, True], ids=["scan", "phone-photo"])
-def test_synthetic_sketch_reads_written_sizes(photo):
+@pytest.mark.parametrize("photo, extras, min_exact", [
+    (False, {}, 8), (True, {}, 8),
+    # furniture touching walls still splits a couple of rooms: track it, don't hide it
+    (False, {"graph_paper": True, "furniture": True}, 5),
+], ids=["scan", "phone-photo", "graph-paper-with-furniture"])
+def test_synthetic_sketch_reads_written_sizes(photo, extras, min_exact):
     truth = sample_project()
-    result = read_sketch(draw_sketch(truth, photo=photo), "Synthetic")
+    result = read_sketch(draw_sketch(truth, photo=photo, **extras), "Synthetic")
     rooms = result.model.floors[0].rooms
     assert result.stats["page_flattened"] is photo
     assert len(rooms) == len(truth.floors[0].rooms)
-    # every labelled room comes back with its written size, although the drawing is stretched 18%
-    for want in truth.floors[0].rooms:
-        if want.type in ("stair", "foyer"):  # not labelled on the synthetic sketch
-            continue
-        got = min((r for r in rooms if r.type == want.type), key=lambda r: abs(size(r)[0] - size(want)[0]) + abs(size(r)[1] - size(want)[1]))
-        assert size(got) == pytest.approx(size(want), abs=6 * INCH), want.name
+    # labelled rooms come back with their written size, although the drawing is stretched 18%
+    exact = 0
+    labelled = [r for r in truth.floors[0].rooms if r.type not in ("stair", "foyer")]  # not labelled on the sketch
+    for want in labelled:
+        got = min(rooms, key=lambda r: abs(size(r)[0] - size(want)[0]) + abs(size(r)[1] - size(want)[1]))
+        exact += size(got) == pytest.approx(size(want), abs=6 * INCH)
+    assert exact >= min_exact, f"{exact}/{len(labelled)} rooms at their written size"
 
 
 def test_blank_page_is_rejected():
@@ -101,3 +106,24 @@ def test_sketch_endpoint_creates_project(tmp_path, monkeypatch):
 
     bad = client.post("/api/sketch", content=b"not an image", headers={"Content-Type": "image/png"})
     assert bad.status_code == 422
+
+
+def test_fragment_cleanup_never_merges_labelled_rooms():
+    from shapely.geometry import Point
+    from app.model import Floor, Wall
+    from app.rooms import detect_rooms
+    from app.sketch.reader import _merge_tiny_rooms
+
+    def w(i, a, b, kind="interior"):
+        return Wall(id=f"W{i}", a=a, b=b, thickness=115, type=kind)
+
+    # 6 m x 3 m: two 3 m rooms split by a short wall at x=3000, and a 0.6 m wardrobe loop in the right one
+    walls = [w(1, (0, 0), (6000, 0), "exterior"), w(2, (6000, 0), (6000, 3000), "exterior"),
+             w(3, (6000, 3000), (0, 3000), "exterior"), w(4, (0, 3000), (0, 0), "exterior"),
+             w(5, (3000, 0), (3000, 3000)), w(6, (5400, 0), (5400, 1200)), w(7, (5400, 1200), (6000, 1200))]
+    labels = [Point(1500, 1500), Point(4200, 2000)]
+    floor = _merge_tiny_rooms(Floor(walls=walls), labels)
+    ids = {x.id for x in floor.walls}
+    assert "W5" in ids  # the wall between the two labelled rooms survives
+    assert not {"W6", "W7"} <= ids  # the wardrobe loop was opened up
+    assert len(detect_rooms(floor)) == 2

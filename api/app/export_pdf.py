@@ -35,6 +35,18 @@ DISCLAIMER = (
 )
 PREFIX = {"door": "D", "window": "W", "ventilator": "V", "opening": "O"}
 KIND_NAME = {"door": "Door", "window": "Window", "ventilator": "Ventilator", "opening": "Opening"}
+STYLE_NAME = {
+    "single": "Single door", "double": "Double door", "sliding": "Sliding door", "french": "French door",
+    "casement": "Casement window", "sliding_window": "Sliding window", "three_panel": "3-panel window",
+    "fixed": "Picture window", "louvered": "Louvered ventilator", "arch": "Arch opening",
+}
+
+
+DEFAULT_STYLE = {"door": "single", "window": "casement", "ventilator": "louvered", "opening": ""}
+
+
+def opening_name(kind: str, style: str) -> str:
+    return STYLE_NAME.get(style or DEFAULT_STYLE[kind]) or KIND_NAME[kind]
 
 
 def export_pdf(model: BuildingModel) -> bytes:
@@ -59,10 +71,10 @@ def opening_schedule(floor: Floor) -> tuple[dict[str, str], list[dict]]:
     codes: dict[str, str] = {}
     order = {"door": 0, "opening": 1, "window": 2, "ventilator": 3}
     for o in sorted(floor.openings, key=lambda o: (order[o.kind], -o.width, -o.height)):
-        key = (o.kind, round(o.width), round(o.height), round(o.sill))
+        key = (o.kind, o.style or DEFAULT_STYLE[o.kind], round(o.width), round(o.height), round(o.sill))
         if key not in groups:
             n = sum(k[0] == o.kind for k in groups) + 1
-            groups[key] = {"code": f"{PREFIX[o.kind]}{n}", "kind": o.kind, "width": o.width,
+            groups[key] = {"code": f"{PREFIX[o.kind]}{n}", "kind": o.kind, "style": o.style, "width": o.width,
                            "height": o.height, "sill": o.sill, "count": 0}
         groups[key]["count"] += 1
         codes[o.id] = groups[key]["code"]
@@ -149,7 +161,9 @@ def _dim_chain(v: View, stations: list[float], at: float, horizontal: bool, text
 
 
 def _table(c: Canvas, x: float, y: float, widths: list[float], header: list[str], rows: list[list[str]],
-           title: str) -> float:
+           title: str, max_rows: int = 99) -> float:
+    if len(rows) > max_rows:  # keep the sheet readable; the full list is in the app and the DXF
+        rows = rows[:max_rows - 1] + [[f"... and {len(rows) - max_rows + 1} more"] + [""] * (len(widths) - 1)]
     c.setFillColorRGB(*INK)
     c.setFont("Helvetica-Bold", 8)
     c.drawString(x, y, title)
@@ -332,20 +346,16 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
             _style(c, 0.3)
             for k in (-h / 3, h / 3):
                 v.line(point_on_wall(w, o.offset, k), point_on_wall(w, o.offset + o.width, k))
-        elif o.kind == "door":
-            (ux, uy), (nx, ny) = wall_frame(w)
-            hinge = point_on_wall(w, o.offset, h * o.side)
-            leaf = point_on_wall(w, o.offset, (h + o.width) * o.side)
-            _style(c, 0.9)
-            v.line(hinge, leaf)
-            a_u = degrees(atan2(uy, ux))
-            a_leaf = degrees(atan2(ny * o.side, nx * o.side))
-            extent = (a_leaf - a_u + 180) % 360 - 180
-            hx, hy = v.p(*hinge)
-            r = o.width / SCALE * mm
-            _style(c, 0.3, dash=([1.5, 1], 0))
-            c.arc(hx - r, hy - r, hx + r, hy + r, a_u, extent)
+        elif o.kind == "door" and o.style == "sliding":
+            _style(c, 1.1)
+            v.line(point_on_wall(w, o.offset, -h / 3), point_on_wall(w, o.offset + o.width * 0.55, -h / 3))
+            v.line(point_on_wall(w, o.offset + o.width * 0.45, h / 3), point_on_wall(w, o.offset + o.width, h / 3))
             _style(c, 0.3)
+        elif o.kind == "door":
+            leaves = [(o.offset, o.width, 1)] if o.style not in ("double", "french") else \
+                [(o.offset, o.width / 2, 1), (o.offset + o.width, o.width / 2, -1)]
+            for s0, width, along in leaves:
+                _door_leaf(c, v, w, s0, width, along, o.side, h)
         # tag
         if w.type == "exterior":
             nx, ny = outward_normal(w, center)
@@ -412,11 +422,11 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
     ], "AREA STATEMENT")
     y = _table(c, x, y, [40 * mm, 32 * mm, 26 * mm], ["Room", "Size", "Area"], [
         [r.name, " x ".join(fi(d) for d in _size(r.polygon)), f"{sqft(r.area):.0f} sq ft"] for r in floor.rooms
-    ], "ROOM SCHEDULE")
-    y = _table(c, x, y, [12 * mm, 22 * mm, 30 * mm, 20 * mm, 14 * mm], ["Code", "Type", "Size (W x H)", "Sill", "Nos"], [
-        [g["code"], KIND_NAME[g["kind"]], f"{fi(g['width'])} x {fi(g['height'])}", fi(g["sill"]) if g["sill"] else "-",
+    ], "ROOM SCHEDULE", max_rows=15)
+    y = _table(c, x, y, [11 * mm, 31 * mm, 26 * mm, 16 * mm, 14 * mm], ["Code", "Type", "Size (W x H)", "Sill", "Nos"], [
+        [g["code"], opening_name(g["kind"], g["style"]), f"{fi(g['width'])} x {fi(g['height'])}", fi(g["sill"]) if g["sill"] else "-",
          str(g["count"])] for g in schedule
-    ], "DOOR & WINDOW SCHEDULE")
+    ], "DOOR & WINDOW SCHEDULE", max_rows=13)
     _notes(c, x, y, [
         "All dimensions in feet-inches unless noted. Do not scale.",
         "External walls 9\" brick, internal walls 4.5\" brick.",
@@ -424,6 +434,22 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
         "Room sizes are centre-line dimensions.",
     ])
     _title_block(c, model, "Ground Floor Plan", "A-101")
+
+
+def _door_leaf(c: Canvas, v: View, w, s0: float, width: float, along: int, side: int, h: float):
+    """Leaf drawn open at 90 degrees from the hinge at s0, with its dashed swing arc back to the wall."""
+    (ux, uy), (nx, ny) = wall_frame(w)
+    hinge = point_on_wall(w, s0, h * side)
+    _style(c, 0.9)
+    v.line(hinge, point_on_wall(w, s0, (h + width) * side))
+    a_u = degrees(atan2(uy * along, ux * along))
+    a_leaf = degrees(atan2(ny * side, nx * side))
+    extent = (a_leaf - a_u + 180) % 360 - 180
+    hx, hy = v.p(*hinge)
+    r = width / SCALE * mm
+    _style(c, 0.3, dash=([1.5, 1], 0))
+    c.arc(hx - r, hy - r, hx + r, hy + r, a_u, extent)
+    _style(c, 0.3)
 
 
 def _size(pts) -> tuple[float, float]:
@@ -581,16 +607,29 @@ def _draw_opening_elev(v: View, a: float, b: float, o: Opening, pl: float):
         _style(c, 0.5, fill=(0.82, 0.90, 0.97))
         v.rect(a, z0, b, z1, fill=1)
         _style(c, 0.35)
-        v.line(((a + b) / 2, z0), ((a + b) / 2, z1))
+        if o.style == "louvered" or o.kind == "ventilator":
+            n = max(2, round((z1 - z0) / 120))
+            for i in range(1, n):
+                v.line((a, z0 + i * (z1 - z0) / n), (b, z0 + i * (z1 - z0) / n))
+        else:
+            panes = {"three_panel": 3, "fixed": 1}.get(o.style, 2)
+            for i in range(1, panes):
+                v.line((a + i * (b - a) / panes, z0), (a + i * (b - a) / panes, z1))
         v.rect(a + 50, z0 + 50, b - 50, z1 - 50)
         _style(c, 0.4, fill=(0.80, 0.78, 0.74))
         v.rect(a - 150, z1 + 50, b + 150, z1 + 130, fill=1)  # chajja
     elif o.kind == "door":
-        _style(c, 0.5, fill=(0.82, 0.68, 0.55))
+        glass = o.style in ("sliding", "french")
+        _style(c, 0.5, fill=(0.82, 0.90, 0.97) if glass else (0.82, 0.68, 0.55))
         v.rect(a, pl, b, z1, fill=1)
         _style(c, 0.3)
-        v.rect(a + 120, pl + 150, b - 120, pl + (z1 - pl) * 0.5)
-        v.rect(a + 120, pl + (z1 - pl) * 0.55, b - 120, z1 - 150)
+        leaves = [(a, b)] if o.style not in ("double", "french", "sliding") else [(a, (a + b) / 2), ((a + b) / 2, b)]
+        for la, lb_ in leaves:
+            if glass:
+                v.rect(la + 60, pl + 60, lb_ - 60, z1 - 60)
+            else:
+                v.rect(la + 120, pl + 150, lb_ - 120, pl + (z1 - pl) * 0.5)
+                v.rect(la + 120, pl + (z1 - pl) * 0.55, lb_ - 120, z1 - 150)
         _style(c, 0.4, fill=(0.80, 0.78, 0.74))
         v.rect(a - 150, z1 + 50, b + 150, z1 + 130, fill=1)
     else:  # open bay (e.g. parking)

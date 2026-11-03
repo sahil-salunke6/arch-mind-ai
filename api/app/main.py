@@ -20,6 +20,10 @@ class Created(BaseModel):
     id: str
 
 
+class Rename(BaseModel):
+    name: str
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True}
@@ -91,6 +95,23 @@ def _attachment(model: BuildingModel, content: bytes, ext: str, media_type: str)
     filename = model.name.replace("×", "x").encode("ascii", "ignore").decode().replace(" ", "_") or "plan"
     return Response(content, media_type=media_type,
                     headers={"Content-Disposition": f'attachment; filename="{filename}.{ext}"'})
+
+
+@app.patch("/api/projects/{id}")
+def rename_project(id: str, body: Rename) -> dict:
+    name = body.name.strip()[:80]
+    if not name:
+        raise HTTPException(422, "name must not be empty")
+    if not store.rename(id, name):
+        raise HTTPException(404, "project not found")
+    return {"id": id, "name": name}
+
+
+@app.delete("/api/projects/{id}", status_code=204)
+def delete_project(id: str) -> Response:
+    if not store.delete(id):
+        raise HTTPException(404, "project not found")
+    return Response(status_code=204)
 
 
 @app.get("/api/projects/{id}/export.dxf")

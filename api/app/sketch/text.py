@@ -19,6 +19,8 @@ class Label:
     value: tuple[float, ...] = ()  # mm: (length,) or (a, b) for sizes
     room_type: str | None = None
     room_name: str | None = None
+    guessed: bool = False  # a room name we don't recognise (e.g. "KEV"), used as written
+    overall: bool = False  # a size for the whole plot/house ("HOUSE PLAN - 18m x 25m")
 
     @property
     def center(self) -> tuple[float, float]:
@@ -51,7 +53,43 @@ def read_text(img: np.ndarray) -> list[Label]:
     labels = []
     for lb in _ocr(img):
         labels += _split_repeats(_reread_sideways(img, lb))
-    return labels
+    return _join_stacked(labels)
+
+
+def _is_words(t: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z &/'.-]*", t.strip()))
+
+
+def _join_stacked(labels: list[Label]) -> list[Label]:
+    """Room names written over two or three lines ("MASTER / BEDROOM", "LARGE / LIVING / HALL") are
+    read as separate boxes; join word-only boxes stacked tightly above each other."""
+    labels = sorted(labels, key=lambda lb: lb.center[1])
+    used: set[int] = set()
+    out = []
+    for i, top in enumerate(labels):
+        if i in used:
+            continue
+        group = [top]
+        if _is_words(top.text):
+            for j in range(i + 1, len(labels)):
+                lb, last = labels[j], group[-1]
+                if j in used or not _is_words(lb.text) or len(group) == 3:
+                    continue
+                lx0, lx1 = last.poly[:, 0].min(), last.poly[:, 0].max()
+                bx0, bx1 = lb.poly[:, 0].min(), lb.poly[:, 0].max()
+                gap = lb.poly[:, 1].min() - last.poly[:, 1].max()
+                overlap = min(lx1, bx1) - max(lx0, bx0)
+                if -0.4 * last.height < gap < 0.7 * last.height and overlap > 0.4 * min(lx1 - lx0, bx1 - bx0):
+                    group.append(lb)
+                    used.add(j)
+        if len(group) == 1:
+            out.append(top)
+            continue
+        pts = np.vstack([g.poly for g in group])
+        x0, y0, x1, y1 = pts[:, 0].min(), pts[:, 1].min(), pts[:, 0].max(), pts[:, 1].max()
+        poly = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+        out.append(Label(text=" ".join(g.text for g in group), poly=poly, score=min(g.score for g in group)))
+    return out
 
 
 def _reread_sideways(img: np.ndarray, lb: Label) -> Label:
@@ -93,11 +131,16 @@ _FT = r"\s*(?:'|′|’|ft\.?|feet)?"
 _INCH = r"(?:\s*-?\s*(\d+(?:\.\d+)?)\s*(?:\"|″|”|''|in))?"
 SIZE = re.compile(rf"^\s*{_NUM}{_FT}{_INCH}\s*[x×X*✕]\s*{_NUM}{_FT}{_INCH}\s*$")
 LENGTH = re.compile(rf"^\s*{_NUM}\s*(?:'|′|’|ft\.?|feet|m|mtr)\s*{_INCH}\s*$", re.I)
+_UNIT = r"\s*(?:'|′|’|ft\.?|feet|m|mtr)?"
+# a size anywhere in a longer label, e.g. "HOUSE PLAN - 18m x 25m" or "30' x 55'"
+SIZE_ANY = re.compile(rf"{_NUM}{_UNIT}{_INCH}\s*[x×X*✕]\s*{_NUM}{_UNIT}{_INCH}", re.I)
+OVERALL_WORDS = re.compile(r"plan|plot|site|house|total|overall|area", re.I)
 METRIC_HINT = re.compile(r"\d\s*m(tr)?\b", re.I)
 
 ROOM_WORDS: list[tuple[str, str, str]] = [  # (pattern, type, display name)
     (r"master\s*bed(room)?|\bm\.?b\.?r\b", "bedroom", "Master Bedroom"),
     (r"bed\s*room|\bbed\b|\bb\.?r\b|शयन", "bedroom", "Bedroom"),
+    (r"^master$|guest|kids?\b", "bedroom", "Bedroom"),
     (r"toilet|\bw\.?c\b|bath|शौचालय|स्नान", "toilet", "Toilet"),
     (r"kitchen|\bkit\b|रसोई", "kitchen", "Kitchen"),
     (r"living|hall|drawing|lounge|बैठक", "living", "Living"),
@@ -107,7 +150,7 @@ ROOM_WORDS: list[tuple[str, str, str]] = [  # (pattern, type, display name)
     (r"stair|steps|सीढ़ी", "stair", "Staircase"),
     (r"balcony|sit\s*out|verandah?", "balcony", "Balcony"),
     (r"store|storage", "store", "Store"),
-    (r"utility|wash", "utility", "Utility"),
+    (r"utility|wash|laundry", "utility", "Laundry"),
     (r"foyer|lobby|entrance|passage", "foyer", "Foyer"),
 ]
 SIDES = {"east": "east", "west": "west", "north": "north", "south": "south"}
@@ -126,14 +169,38 @@ def parse_length(text: str) -> float | None:
     return None
 
 
+VOCAB = ["bedroom", "master", "toilet", "bath", "bathroom", "kitchen", "living", "hall", "drawing", "dining",
+         "parking", "garage", "puja", "pooja", "stair", "staircase", "balcony", "store", "storage", "utility",
+         "wash", "laundry", "foyer", "lobby", "entrance", "passage", "attached", "common", "guest", "study"]
+
+
+def _fix_spelling(text: str) -> str:
+    """OCR of handwriting slips a letter or two ("Diinng", "Bathrocm"); snap words to the room vocabulary."""
+    from difflib import get_close_matches
+
+    out = []
+    for word in text.split():
+        core = re.sub(r"[^a-z]", "", word.lower())
+        if len(core) >= 4 and core not in VOCAB:
+            match = get_close_matches(core, VOCAB, n=1, cutoff=0.75)
+            if match:
+                out.append(match[0].capitalize() if word[:1].isupper() else match[0])
+                continue
+        out.append(word)
+    return " ".join(out)
+
+
 def classify(labels: list[Label]) -> list[Label]:
     for lb in labels:
+        if _is_words(lb.text):
+            lb.text = _fix_spelling(lb.text)
         t = lb.text
         low = t.lower()
-        if m := SIZE.match(t):
+        if (m := SIZE.match(t)) or (m := SIZE_ANY.search(t)):
             metric = METRIC_HINT.search(t) and "'" not in t
             conv = (lambda v, _i: float(v) * 1000) if metric else _ft
             lb.role, lb.value = "size", (conv(m.group(1), m.group(2)), conv(m.group(3), m.group(4)))
+            lb.overall = bool(OVERALL_WORDS.search(t))
             continue
         if "road" in low:
             side = next((v for k, v in SIDES.items() if k in low), None)
@@ -162,6 +229,11 @@ def classify(labels: list[Label]) -> list[Label]:
                 if rtype == "living" and "dining" in low:
                     lb.room_name = "Living / Dining"
                 break
+    # any other short word is probably the name someone gave a room ("Kev", "Bonus", "Office")
+    for lb in labels:
+        word = re.sub(r"[^A-Za-z /&]", "", lb.text).strip()
+        if lb.role == "note" and 2 <= len(word) <= 16 and word.lower() not in ("n", "up", "dn", "floor"):
+            lb.role, lb.room_type, lb.room_name, lb.guessed = "room", "other", _title(word), True
     _attach_numbers(labels, "margin", above=True)
     _attach_numbers(labels, "gate", above=False)
     return labels

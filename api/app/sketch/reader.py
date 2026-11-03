@@ -213,11 +213,16 @@ def _constraints(labels: list[Label], grid: _Grid, walls_px, plot) -> list[_C]:
     bx = [grid.x[i] for hz, line, a, b, _ in walls_px for i in ((a, b) if hz else (line,))]
     by = [grid.y[j] for hz, line, a, b, _ in walls_px for j in ((line,) if hz else (a, b))]
     b_left, b_right, b_top, b_bottom = grid.xi(min(bx)), grid.xi(max(bx)), grid.yi(min(by)), grid.yi(max(by))
+    overall = None
     for lb in labels:
         cx, cy = lb.center
         if lb.role == "size":
-            enc = _enclosure(walls_px, grid, cx, cy)
+            enc = None if lb.overall else _enclosure(walls_px, grid, cx, cy)
             if not enc:
+                # a size not written inside a room describes the whole plot (or the house when
+                # there's no plot boundary): keep the biggest such size
+                if min(lb.value) >= 15 * MM_PER_FT and (overall is None or min(lb.value) > min(overall.value)):
+                    overall = lb
                 continue
             l, r, t, b = enc
             pw, ph = grid.x[r] - grid.x[l], grid.y[b] - grid.y[t]
@@ -243,6 +248,15 @@ def _constraints(labels: list[Label], grid: _Grid, walls_px, plot) -> list[_C]:
                 out.append(_C("x", px0, b_left, lb.value[0], f"Left margin ({fi(lb.value[0])})", weight=2.0))
             elif cx > grid.x[b_right]:
                 out.append(_C("x", b_right, px1, lb.value[0], f"Right margin ({fi(lb.value[0])})", weight=2.0))
+    if overall:
+        l, t, r, b = grid.plot if grid.plot else (b_left, b_top, b_right, b_bottom)
+        w, h = overall.value
+        pw, ph = grid.x[r] - grid.x[l], grid.y[b] - grid.y[t]
+        if (w > h) != (pw > ph):  # "30' x 55'" names the short side first on a tall drawing too
+            w, h = h, w
+        what = "Plot" if grid.plot else "House"
+        out += [_C("x", l, r, w, f"{what} width ({overall.text})", weight=3.0),
+                _C("y", t, b, h, f"{what} depth ({overall.text})", weight=3.0)]
     for c in out:
         stations = grid.x if c.axis == "x" else grid.y
         c.px = stations[c.j] - stations[c.i]
@@ -278,6 +292,10 @@ def _solve(grid: _Grid, constraints: list[_C], scale: float) -> tuple[list[float
             if c.axis == axis:
                 add({c.j: 1, c.i: -1}, c.value, c.weight)
         sol, *_ = np.linalg.lstsq(np.array(rows), np.array(rhs), rcond=None)
+        # contradictory sizes can pull a station past its neighbour; keep the drawn order
+        sol = np.maximum.accumulate(sol + np.arange(n) * 1e-6)
+        for k in range(1, n):
+            sol[k] = max(sol[k], sol[k - 1] + 25.4)
         # whole inches read better than 11'-7.3"
         result.append([round(v / 25.4) * 25.4 for v in sol])
     return result[0], result[1]
@@ -344,6 +362,7 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         gx = float(np.interp(g.center[0], grid.x, X)) - ox
         gate = (round(max(0.0, gx - g.value[0] / 2), 1), g.value[0])
 
+    openings = _fit_openings(walls, openings)
     template = sample_project()
     model = BuildingModel(
         name=name, north_deg=SIDE_NORTH[road],
@@ -352,12 +371,13 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         floors=[Floor(walls=walls, openings=openings)],
         assemblies=template.assemblies,
     )
-    floor = model.floors[0]
-    rooms = detect_rooms(floor)
-
     # name rooms from the labels written inside them
     def to_mm(px: tuple[float, float]) -> tuple[float, float]:
         return float(np.interp(px[0], grid.x, X)) - ox, oy_bottom - float(np.interp(px[1], grid.y, Y))
+
+    floor = _merge_tiny_rooms(model.floors[0], [ShPoint(to_mm(lb.center)) for lb in labels if lb.role == "room"])
+    model = model.model_copy(update={"floors": [floor]})
+    rooms = detect_rooms(floor)
 
     named = 0
     stairs_mm = [ShPoint(to_mm(((r[0] + r[2]) / 2, (r[1] + r[3]) / 2))) for r in strokes.stairs]
@@ -366,8 +386,16 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
         poly = Polygon(room.polygon)
         inside = [lb for lb in labels if lb.role == "room" and poly.contains(ShPoint(to_mm(lb.center)))]
         if inside:  # a written name wins; an open stair often shares its space with the hall
-            lb = inside[0]
+            # prefer a recognised room word over a guessed one, then the label nearest the middle
+            centre = poly.centroid
+            lb = min(inside, key=lambda lb: (lb.guessed, ShPoint(to_mm(lb.center)).distance(centre)))
             room.type, room.name, room.label_raw = lb.room_type, lb.room_name, lb.text
+            # an open-plan space labelled in several places ("Open Kitchen", "Dining", "Living Hall")
+            known = list(dict.fromkeys(x.room_name for x in sorted(inside, key=lambda x: x.center[1]) if not x.guessed))
+            if len(known) >= 2:
+                types = {x.room_type for x in inside if not x.guessed}
+                room.name = " / ".join(known[:3])
+                room.type = next((t for t in ("living", "kitchen", "dining") if t in types), room.type)
             named += 1
         elif any(poly.contains(p) for p in stairs_mm):
             room.type, room.name = "stair", "Staircase"
@@ -383,11 +411,75 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
     if strokes.stairs and not any(r.type == "stair" for r in rooms):
         warnings.append("Found a staircase, but it isn't closed off by walls, so it is part of a bigger room. "
                         "Draw the walls around it in the editor and set its use to Staircase.")
-    missing = [lb.room_name for lb in labels if lb.role == "room"
+    missing = [lb.room_name for lb in labels if lb.role == "room" and not lb.guessed
                and not any(Polygon(r.polygon).contains(ShPoint(to_mm(lb.center))) for r in rooms)]
     if missing:
         warnings.append(f"Could not find closed walls around: {', '.join(missing)}. Draw the missing walls in the editor.")
     return model.model_copy(update={"floors": [floor.model_copy(update={"rooms": rooms})]}), named
+
+
+def _fit_openings(walls: list[Wall], openings: list[Opening]) -> list[Opening]:
+    """Last guard before validation: clamp each opening onto its wall, drop the ones that can't fit."""
+    lengths = {w.id: w.length for w in walls}
+    out = []
+    for o in openings:
+        length = lengths.get(o.wall, 0.0)
+        width = min(o.width, length - 50)
+        if width < 450:
+            continue
+        out.append(o.model_copy(update={"width": width, "offset": min(max(0.0, o.offset), length - width)}))
+    return out
+
+
+TINY_AREA = 1.4e6  # mm²: ~15 sq ft
+TINY_SIDE = 800  # mm
+
+
+def _merge_tiny_rooms(floor: Floor, label_points: list[ShPoint]) -> Floor:
+    """Fixtures and furniture leave little closed loops (a wardrobe, a WC, a car outline). Remove the
+    short wall that closes each unlabelled tiny room so it joins its neighbour, but never a wall whose
+    removal would run two labelled rooms together."""
+    from shapely.geometry import LineString
+
+    def labelled_rooms(f: Floor) -> int:
+        polys = [Polygon(r.polygon) for r in detect_rooms(f.model_copy(update={"rooms": []}))]
+        return sum(any(poly.contains(p) for p in label_points) for poly in polys)
+
+    def without(f: Floor, wall_id: str) -> Floor:
+        return f.model_copy(update={"walls": [w for w in f.walls if w.id != wall_id],
+                                    "openings": [o for o in f.openings if o.wall != wall_id]})
+
+    skipped: set[tuple[int, int]] = set()
+    baseline = labelled_rooms(floor)
+    for _ in range(80):
+        rooms = detect_rooms(floor.model_copy(update={"rooms": []}))
+        changed = False
+        for room in sorted(rooms, key=lambda r: r.area):
+            poly = Polygon(room.polygon)
+            key = (round(poly.centroid.x / 100), round(poly.centroid.y / 100))
+            x0, y0, x1, y1 = poly.bounds
+            tiny = poly.area < TINY_AREA or min(x1 - x0, y1 - y0) < TINY_SIDE
+            if not tiny or key in skipped or any(poly.contains(p) for p in label_points):
+                continue
+            candidates = []
+            for w in floor.walls:
+                if w.type == "exterior":
+                    continue
+                line = LineString([w.a, w.b])
+                shared = poly.exterior.intersection(line.buffer(5)).length
+                if shared > 0.3 * line.length and line.length <= max(2500.0, 1.5 * max(x1 - x0, y1 - y0)):
+                    candidates.append((line.length, w.id))
+            for _, wall_id in sorted(candidates):
+                trial = without(floor, wall_id)
+                if labelled_rooms(trial) >= baseline:
+                    floor, changed = trial, True
+                    break
+            if changed:
+                break
+            skipped.add(key)
+        if not changed:
+            return floor
+    return floor
 
 
 def _merge_runs(runs: list[tuple[int, int, float]]) -> list[tuple[int, int]]:

@@ -142,3 +142,27 @@ def test_room_names_are_unique_even_with_duplicate_input():
     halves = [[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], [(4000, 0), (8000, 0), (8000, 3000), (4000, 3000)]]
     same = [Room(id=f"R-{i}", name="Bedroom", type="bedroom", polygon=p) for i, p in enumerate(halves)]
     assert sorted(r.name for r in detect_rooms(Floor(walls=walls, rooms=same))) == ["Bedroom", "Bedroom (2)"]
+
+
+def test_rename_and_delete_project(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "store", ProjectStore(tmp_path / "t.db"))
+    client = TestClient(main.app)
+    pid = client.post("/api/projects").json()["id"]
+    assert client.patch(f"/api/projects/{pid}", json={"name": "  Villa  "}).json()["name"] == "Villa"
+    assert client.get(f"/api/projects/{pid}").json()["name"] == "Villa"
+    assert client.patch(f"/api/projects/{pid}", json={"name": " "}).status_code == 422
+    assert client.delete(f"/api/projects/{pid}").status_code == 204
+    assert client.get(f"/api/projects/{pid}").status_code == 404
+    assert client.delete(f"/api/projects/{pid}").status_code == 404
+
+
+def test_opening_styles_in_schedule_and_pdf():
+    from app.export_pdf import export_pdf, opening_name, opening_schedule
+    model = sample_project()
+    ops = model.floors[0].openings
+    ops[:] = [o.model_copy(update={"style": "double"}) if o.id == "D-main" else o for o in ops]
+    _, rows = opening_schedule(model.floors[0])
+    names = {opening_name(r["kind"], r["style"]) for r in rows}
+    assert {"Double door", "Single door", "Casement window", "Louvered ventilator"} <= names
+    text = PdfReader(io.BytesIO(export_pdf(model))).pages[0].extract_text()
+    assert "Double door" in text

@@ -190,25 +190,65 @@ function OpeningMesh({ model, opening: o }: { model: BuildingModel; opening: Ope
   const { u, n } = wallFrame(wall);
   const rotY = Math.atan2(u[1], u[0]);
   const base = floor.plinth;
+  const at = (s: number, z: number, k = 0) => S(pointOnWall(wall, s, k), base + z);
+
   if (o.kind === "window" || o.kind === "ventilator") {
-    const c = S(pointOnWall(wall, o.offset + o.width / 2), base + o.sill + o.height / 2);
+    const mid = o.offset + o.width / 2;
+    const zc = o.sill + o.height / 2;
+    // vertical mullions per style: casement 1, 3-panel 2, sliding = overlapping sashes, fixed none
+    const panes = o.style === "three_panel" ? 3 : o.style === "fixed" ? 1 : 2;
+    const louvres = o.style === "louvered" || o.kind === "ventilator";
+    const slats = Math.max(2, Math.round(o.height / 120));
     return (
       <group>
-        <Box at={c} size={[o.width, o.height, 30]} rotY={rotY} color="#9fc8e6" transparent opacity={0.5} />
-        <Box at={S(pointOnWall(wall, o.offset + o.width / 2), base + o.sill - 25)} size={[o.width + 100, 50, wall.thickness + 60]} rotY={rotY} color="#5b5d66" />
-        <Box at={S(pointOnWall(wall, o.offset + o.width / 2), base + o.sill + o.height + 40)} size={[o.width + 300, 80, wall.thickness + 250]} rotY={rotY} color="#d9d4ca" />
+        {o.style === "sliding_window" ? (
+          <>
+            <Box at={at(o.offset + o.width * 0.27, zc, -25)} size={[o.width * 0.55, o.height, 25]} rotY={rotY} color="#9fc8e6" transparent opacity={0.5} />
+            <Box at={at(o.offset + o.width * 0.73, zc, 25)} size={[o.width * 0.55, o.height, 25]} rotY={rotY} color="#9fc8e6" transparent opacity={0.5} />
+          </>
+        ) : (
+          <Box at={at(mid, zc)} size={[o.width, o.height, 30]} rotY={rotY} color="#9fc8e6" transparent opacity={0.5} />
+        )}
+        {!louvres && Array.from({ length: panes - 1 }, (_, i) => (
+          <Box key={i} at={at(o.offset + ((i + 1) * o.width) / panes, zc)} size={[45, o.height, 60]} rotY={rotY} color="#5b5d66" />
+        ))}
+        {louvres && Array.from({ length: slats }, (_, i) => (
+          <Box key={i} at={at(mid, o.sill + ((i + 0.5) * o.height) / slats)} size={[o.width, 25, 70]} rotY={rotY} color="#d6d3cc" />
+        ))}
+        <Box at={at(mid, o.sill - 25)} size={[o.width + 100, 50, wall.thickness + 60]} rotY={rotY} color="#5b5d66" />
+        <Box at={at(mid, o.sill + o.height + 40)} size={[o.width + 300, 80, wall.thickness + 250]} rotY={rotY} color="#d9d4ca" />
       </group>
     );
   }
+
   if (o.kind === "door") {
-    const open = (70 * Math.PI) / 180;
-    const hinge = pointOnWall(wall, o.offset, (wall.thickness / 2) * o.side);
-    const dir: Point = [
-      Math.cos(open) * u[0] + Math.sin(open) * n[0] * o.side,
-      Math.cos(open) * u[1] + Math.sin(open) * n[1] * o.side,
-    ];
-    const mid: Point = [hinge[0] + (dir[0] * o.width) / 2, hinge[1] + (dir[1] * o.width) / 2];
-    return <Box at={S(mid, base + o.height / 2)} size={[o.width, o.height, 40]} rotY={Math.atan2(dir[1], dir[0])} color="#8a5a3b" />;
+    const leaf = (hingeS: number, width: number, swingAlong: 1 | -1, glass: boolean, key: string) => {
+      const open = (70 * Math.PI) / 180;
+      const hinge = pointOnWall(wall, hingeS, (wall.thickness / 2) * o.side);
+      const dir: Point = [
+        Math.cos(open) * u[0] * swingAlong + Math.sin(open) * n[0] * o.side,
+        Math.cos(open) * u[1] * swingAlong + Math.sin(open) * n[1] * o.side,
+      ];
+      const centre: Point = [hinge[0] + (dir[0] * width) / 2, hinge[1] + (dir[1] * width) / 2];
+      return glass ? (
+        <Box key={key} at={S(centre, base + o.height / 2)} size={[width, o.height, 30]} rotY={Math.atan2(dir[1], dir[0])} color="#9fc8e6" transparent opacity={0.55} />
+      ) : (
+        <Box key={key} at={S(centre, base + o.height / 2)} size={[width, o.height, 40]} rotY={Math.atan2(dir[1], dir[0])} color="#8a5a3b" />
+      );
+    };
+    if (o.style === "sliding") {
+      return (
+        <group>
+          <Box at={at(o.offset + o.width * 0.3, o.height / 2, -30)} size={[o.width * 0.55, o.height, 30]} rotY={rotY} color="#9fc8e6" transparent opacity={0.55} />
+          <Box at={at(o.offset + o.width * 0.7, o.height / 2, 30)} size={[o.width * 0.55, o.height, 30]} rotY={rotY} color="#9fc8e6" transparent opacity={0.55} />
+        </group>
+      );
+    }
+    if (o.style === "double" || o.style === "french") {
+      const half = o.width / 2;
+      return <group>{leaf(o.offset, half, 1, o.style === "french", "a")}{leaf(o.offset + o.width, half, -1, o.style === "french", "b")}</group>;
+    }
+    return leaf(o.offset, o.width, 1, false, "a");
   }
   return null;
 }
@@ -229,6 +269,7 @@ function FurnitureMesh({ model, f }: { model: BuildingModel; f: Furniture }) {
 
   let body: ReactNode;
   switch (f.type) {
+    case "bed_single":
     case "bed_double":
       body = [
         part(0, 0, 0, w, d, 300, "#9b7350", 1), part(0, 0, 300, w - 60, d - 60, 220, "#fbfbfd", 2),

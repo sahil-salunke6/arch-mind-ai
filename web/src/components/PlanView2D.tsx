@@ -4,7 +4,7 @@ import type { BuildingModel, Furniture, Layers, Opening, Point, Selection, Tool,
 import {
   bbox, centroid, ftIn, pointOnWall, projectOnWall, ROOM_COLORS, roomSize, solidSpans, spanRect, stairLayout, wallLength,
 } from "../lib/geometry";
-import { addOpening, addOuterWalls, addWall, moveEndpoint, moveWall, updateOpening } from "../lib/edit";
+import { addOpening, addOuterWalls, addWall, moveEndpoint, moveWall, updateFurniture, updateOpening } from "../lib/edit";
 
 const PAD = 2600;
 const ROAD = 2400;
@@ -32,7 +32,9 @@ type Drag =
   | { kind: "pan"; start: [number, number]; vb: ViewBox; moved: boolean; roomId: string | null }
   | { kind: "endpoint"; wallId: string; end: "a" | "b"; original: BuildingModel; moved: boolean }
   | { kind: "wall"; wallId: string; start: Point; original: BuildingModel; moved: boolean }
-  | { kind: "opening"; id: string; grab: number; original: BuildingModel; moved: boolean };
+  | { kind: "opening"; id: string; grab: number; original: BuildingModel; moved: boolean }
+  | { kind: "opening-end"; id: string; end: "start" | "end"; original: BuildingModel; moved: boolean }
+  | { kind: "furniture"; id: string; start: Point; pos0: Point; original: BuildingModel; moved: boolean };
 
 type ViewBox = { x: number; y: number; w: number; h: number };
 
@@ -169,6 +171,14 @@ export default function PlanView2D(props: Props) {
     startDrag(e, { kind: "opening", id: o.id, grab: s - o.offset, original: model, moved: false });
   };
 
+  const onFurnitureDown = (e: React.PointerEvent, f: Furniture) => {
+    if (editable && tool === "wall") { e.stopPropagation(); return onBackgroundDown(e); }
+    e.stopPropagation();
+    onSelect({ kind: "furniture", id: f.id });
+    if (!editable || tool !== "select") return;
+    startDrag(e, { kind: "furniture", id: f.id, start: toModel(e.clientX, e.clientY), pos0: f.pos, original: model, moved: false });
+  };
+
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current;
     const raw = toModel(e.clientX, e.clientY);
@@ -193,6 +203,21 @@ export default function PlanView2D(props: Props) {
       if (!d.moved && Math.hypot(delta[0], delta[1]) < 4 * mmPerPx()) return;
       const rounded: Point = [Math.round(delta[0] / GRID) * GRID, Math.round(delta[1] / GRID) * GRID];
       emit(moveWall(model, d.wallId, rounded, d.original));
+    } else if (d.kind === "furniture") {
+      const dx = raw[0] - d.start[0], dy = raw[1] - d.start[1];
+      if (!d.moved && Math.hypot(dx, dy) < 4 * mmPerPx()) return;
+      const pos: Point = [d.pos0[0] + Math.round(dx / GRID) * GRID, d.pos0[1] + Math.round(dy / GRID) * GRID];
+      emit(updateFurniture(d.original, d.id, { pos }));
+    } else if (d.kind === "opening-end") {
+      // drag one jamb along the wall; the other stays put (min 1'-6", stays on the wall)
+      const o = d.original.floors[0].openings.find((x) => x.id === d.id)!;
+      const w = d.original.floors[0].walls.find((x) => x.id === o.wall)!;
+      const s = Math.round(projectOnWall(w, raw).s / GRID) * GRID;
+      const MIN = 457.2;
+      const patch = d.end === "start"
+        ? (() => { const s0 = Math.min(Math.max(0, s), o.offset + o.width - MIN); return { offset: s0, width: o.offset + o.width - s0 }; })()
+        : { width: Math.min(Math.max(MIN, s - o.offset), wallLength(w) - o.offset) };
+      emit(updateOpening(d.original, d.id, patch));
     } else if (d.kind === "opening") {
       const o = d.original.floors[0].openings.find((x) => x.id === d.id)!;
       const w = d.original.floors[0].walls.find((x) => x.id === o.wall)!;
@@ -272,7 +297,10 @@ export default function PlanView2D(props: Props) {
           )),
         )}
 
-        {layers.furniture && floor.furniture.map((f) => <FurniturePlan key={f.id} f={f} />)}
+        {layers.furniture && floor.furniture.map((f) => (
+          <FurniturePlan key={f.id} f={f} selected={selection?.kind === "furniture" && selection.id === f.id} px={px}
+            onPointerDown={(e) => onFurnitureDown(e, f)} movable={editable && tool === "select"} />
+        ))}
 
         {/* Walls */}
         {floor.walls.map((w) =>
@@ -298,13 +326,7 @@ export default function PlanView2D(props: Props) {
             <g key={o.id} onPointerDown={(e) => onOpeningDown(e, o)} style={{ cursor: editable ? "ew-resize" : "pointer" }}>
               <polygon points={pts(spanRect(w, o.offset, o.offset + o.width, -h - 150, h + 150))} fill={sel ? "rgba(106,69,245,0.18)" : "transparent"}
                 stroke={sel ? BRAND : "none"} strokeWidth={3 * px} />
-              {(o.kind === "window" || o.kind === "ventilator") && (
-                <>
-                  <polygon points={pts(spanRect(w, o.offset, o.offset + o.width))} fill="#ffffff" stroke="#2a2833" strokeWidth={20} />
-                  <line {...lineProps(pointOnWall(w, o.offset, 0), pointOnWall(w, o.offset + o.width, 0))} stroke="#4f8fd6" strokeWidth={30} />
-                </>
-              )}
-              {o.kind === "door" && <DoorSwing w={w} offset={o.offset} width={o.width} side={o.side} h={h} />}
+              <OpeningSymbol w={w} o={o} h={h} />
             </g>
           );
         })}
@@ -346,6 +368,24 @@ export default function PlanView2D(props: Props) {
             })}
           </g>
         )}
+
+        {/* Selected door/window: drag either end to resize it */}
+        {editable && tool === "select" && selOpening && walls.get(selOpening.wall) && (() => {
+          const w = walls.get(selOpening.wall)!;
+          return (
+            <g>
+              <WallLength w={{ ...w, a: pointOnWall(w, selOpening.offset), b: pointOnWall(w, selOpening.offset + selOpening.width) }} px={px} />
+              {([["start", selOpening.offset], ["end", selOpening.offset + selOpening.width]] as const).map(([end, s]) => {
+                const [x, y] = P(pointOnWall(w, s));
+                return (
+                  <rect key={end} x={x - 5 * px} y={y - 9 * px} width={10 * px} height={18 * px} rx={3 * px} fill="#fff" stroke={BRAND} strokeWidth={2.5 * px}
+                    style={{ cursor: "ew-resize" }} transform={`rotate(${-Math.atan2(w.b[1] - w.a[1], w.b[0] - w.a[0]) * 180 / Math.PI} ${x} ${y})`}
+                    onPointerDown={(e) => startDrag(e, { kind: "opening-end", id: selOpening.id, end, original: model, moved: false })} />
+                );
+              })}
+            </g>
+          );
+        })()}
 
         {/* Wall drawing preview */}
         {editable && tool === "wall" && preview && Math.hypot(preview.b[0] - preview.a[0], preview.b[1] - preview.a[1]) > 1 && (
@@ -469,26 +509,77 @@ function lineProps(a: Point, b: Point) {
   return { x1, y1, x2, y2 };
 }
 
+/** Plan symbol for a door, window, ventilator or opening, by style. */
+function OpeningSymbol({ w, o, h }: { w: Wall; o: Opening; h: number }) {
+  const s0 = o.offset, s1 = o.offset + o.width, mid = (s0 + s1) / 2;
+  const line = (a: number, b: number, k: number, stroke = "#2a2833", width = 20) => (
+    <line {...lineProps(pointOnWall(w, a, k), pointOnWall(w, b, k))} stroke={stroke} strokeWidth={width} />
+  );
+  if (o.kind === "door") {
+    if (o.style === "sliding") {
+      return <g>{line(s0, mid + 100, -h / 3, "#2a2833", 40)}{line(mid - 100, s1, h / 3, "#2a2833", 40)}</g>;
+    }
+    if (o.style === "double" || o.style === "french") {
+      const half = o.width / 2;
+      return (
+        <g>
+          <DoorSwing w={w} offset={s0} width={half} side={o.side} h={h} />
+          <DoorSwing w={w} offset={s1} width={-half} side={o.side} h={h} />
+          {o.style === "french" && line(s0, s1, 0, "#4f8fd6", 18)}
+        </g>
+      );
+    }
+    return <DoorSwing w={w} offset={s0} width={o.width} side={o.side} h={h} />;
+  }
+  if (o.kind === "opening") {
+    return o.style === "arch" ? <g strokeDasharray="60 50">{line(s0, s1, -h, "#2a2833", 14)}{line(s0, s1, h, "#2a2833", 14)}</g> : null;
+  }
+  const glass = "#4f8fd6";
+  const frame = <polygon points={pts(spanRect(w, s0, s1))} fill="#ffffff" stroke="#2a2833" strokeWidth={20} />;
+  if (o.style === "louvered" || o.kind === "ventilator") {
+    const n = Math.max(2, Math.round(o.width / 120));
+    return <g>{frame}{Array.from({ length: n }, (_, i) => line(s0 + (i + 0.5) * o.width / n - 40, s0 + (i + 0.5) * o.width / n + 40, 0, glass, 16))}</g>;
+  }
+  if (o.style === "sliding_window") return <g>{frame}{line(s0, mid + 80, -h / 3, glass, 24)}{line(mid - 80, s1, h / 3, glass, 24)}</g>;
+  if (o.style === "fixed") return <g>{frame}{line(s0, s1, 0, glass, 45)}</g>;
+  const panes = o.style === "three_panel" ? 3 : 2;
+  return (
+    <g>
+      {frame}
+      {line(s0, s1, 0, glass, 30)}
+      {Array.from({ length: panes - 1 }, (_, i) => {
+        const s = s0 + ((i + 1) * o.width) / panes;
+        return <line key={i} {...lineProps(pointOnWall(w, s, -h), pointOnWall(w, s, h))} stroke="#2a2833" strokeWidth={16} />;
+      })}
+    </g>
+  );
+}
+
+/** One door leaf hinged at `offset`; a negative width hinges at the far jamb and swings back. */
 function DoorSwing({ w, offset, width, side, h }: { w: Wall; offset: number; width: number; side: 1 | -1; h: number }) {
+  const r = Math.abs(width);
   const H = P(pointOnWall(w, offset, h * side));
-  const L = P(pointOnWall(w, offset, (h + width) * side));
+  const L = P(pointOnWall(w, offset, (h + r) * side));
   const E = P(pointOnWall(w, offset + width, h * side));
   const cross = (L[0] - H[0]) * (E[1] - H[1]) - (L[1] - H[1]) * (E[0] - H[0]);
   return (
     <g fill="none" stroke="#2a2833">
       <line x1={H[0]} y1={H[1]} x2={L[0]} y2={L[1]} strokeWidth={45} />
-      <path d={`M${L[0]},${L[1]} A${width},${width} 0 0 ${cross > 0 ? 1 : 0} ${E[0]},${E[1]}`} strokeWidth={18} strokeDasharray="70 50" />
+      <path d={`M${L[0]},${L[1]} A${r},${r} 0 0 ${cross > 0 ? 1 : 0} ${E[0]},${E[1]}`} strokeWidth={18} strokeDasharray="70 50" />
     </g>
   );
 }
 
-function FurniturePlan({ f }: { f: Furniture }) {
+function FurniturePlan({ f, selected, px, onPointerDown, movable }: {
+  f: Furniture; selected: boolean; px: number; onPointerDown: (e: React.PointerEvent) => void; movable: boolean;
+}) {
   const [w, d] = f.size;
   const [x, y] = P(f.pos);
   const box = (bx: number, by: number, bw: number, bd: number, fill = "#ffffff", rx = 60) => (
     <rect x={bx - bw / 2} y={-(by + bd / 2)} width={bw} height={bd} rx={rx} fill={fill} stroke="#8d8a99" strokeWidth={18} />
   );
   const parts: Record<string, ReactNode> = {
+    bed_single: <>{box(0, 0, w, d, "#ffffff")}{box(0, d / 2 - 380, w * 0.7, 420, "#eef0f6")}{box(0, -d / 6, w, d * 0.62, "#e4dcf7", 40)}</>,
     bed_double: <>{box(0, 0, w, d, "#ffffff")}{box(-w / 4.4, d / 2 - 380, w / 2.6, 420, "#eef0f6")}{box(w / 4.4, d / 2 - 380, w / 2.6, 420, "#eef0f6")}{box(0, -d / 6, w, d * 0.62, "#e4dcf7", 40)}</>,
     sofa: <>{box(0, 0, w, d, "#e8e1d4")}{box(0, -d / 2 + 160, w, 300, "#d8cfbf")}</>,
     car: <>{box(0, 0, w, d, "#ffffff", 600)}{box(0, d * 0.05, w * 0.78, d * 0.42, "#dfe7f1", 300)}</>,
@@ -497,8 +588,12 @@ function FurniturePlan({ f }: { f: Furniture }) {
     wc: <>{box(0, 0, w, d, "#ffffff", 200)}{box(0, d / 2 - 150, w, 260, "#eef0f6", 40)}</>,
   };
   return (
-    <g transform={`translate(${x} ${y}) rotate(${-f.rot})`} pointerEvents="none">
+    <g transform={`translate(${x} ${y}) rotate(${-f.rot})`} onPointerDown={onPointerDown} style={{ cursor: movable ? "move" : "pointer" }}>
       {parts[f.type] ?? box(0, 0, w, d, "#f2f0f6", 30)}
+      {selected && (
+        <rect x={-w / 2 - 4 * px} y={-d / 2 - 4 * px} width={w + 8 * px} height={d + 8 * px} rx={4 * px}
+          fill="rgba(106,69,245,0.08)" stroke={BRAND} strokeWidth={2.5 * px} strokeDasharray={`${6 * px} ${4 * px}`} />
+      )}
     </g>
   );
 }

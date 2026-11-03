@@ -38,6 +38,13 @@ export const api = {
   save: (id: string, model: BuildingModel) =>
     fetch(`/api/projects/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(model) })
       .then((r) => json<BuildingModel>(r)),
+  rename: (id: string, name: string) =>
+    fetch(`/api/projects/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }) })
+      .then((r) => json<{ id: string; name: string }>(r)),
+  remove: async (id: string) => {
+    const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  },
   /** Upload a sketch photo; the server reads it into a new project. */
   readSketch: async (file: File) => {
     const res = await fetch("/api/sketch", {

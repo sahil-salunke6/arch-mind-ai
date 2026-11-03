@@ -82,13 +82,15 @@ export function viewDirection(model: BuildingModel, view: ViewName): Point | nul
 
 export function footprint(model: BuildingModel) {
   const all = model.floors[0].walls;
-  const ext = all.some((w) => w.type === "exterior") ? all.filter((w) => w.type === "exterior") : all;
+  let ext = all.some((w) => w.type === "exterior") ? all.filter((w) => w.type === "exterior") : all;
   if (!ext.length) {
     const p = bbox(model.plot.polygon);
     return { ...p, x0: p.cx, x1: p.cx, y0: p.cy, y1: p.cy, w: 0, h: 0 };
   }
+  let b = bbox(ext.flatMap((w) => [w.a, w.b]));
+  const whole = bbox(all.flatMap((w) => [w.a, w.b]));
+  if (b.w * b.h < 0.5 * whole.w * whole.h) { ext = all; b = whole; } // outer walls only partly drawn
   const t = Math.max(...ext.map((w) => w.thickness)) / 2;
-  const b = bbox(ext.flatMap((w) => [w.a, w.b]));
   return { ...b, x0: b.x0 - t, x1: b.x1 + t, y0: b.y0 - t, y1: b.y1 + t, w: b.w + 2 * t, h: b.h + 2 * t };
 }
 

@@ -41,10 +41,20 @@ class Wall(BaseModel):
         return hypot(self.b[0] - self.a[0], self.b[1] - self.a[1])
 
 
+OpeningStyle = Literal[
+    "",  # default for the kind: single swing door / two-shutter casement window
+    "single", "double", "sliding", "french",  # doors
+    "casement", "sliding_window", "three_panel", "fixed",  # windows
+    "louvered",  # ventilators
+    "arch",  # openings
+]
+
+
 class Opening(BaseModel):
     id: str
     wall: str
     kind: Literal["door", "window", "opening", "ventilator"]
+    style: OpeningStyle = ""
     offset: float  # distance from wall.a to the near edge of the opening
     width: float
     height: float

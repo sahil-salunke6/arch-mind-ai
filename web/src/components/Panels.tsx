@@ -1,13 +1,14 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   AlertTriangle, BedDouble, Building2, Car, CheckCircle2, Compass, FilePlus2, Frame, ImagePlus, Info, Layers, Loader2, Ruler, ShowerHead,
-  Sparkles, SquareDashed, Trash2,
+  Pencil, RotateCcw, RotateCw, Sparkles, SquareDashed, Trash2,
 } from "lucide-react";
 import type { ProjectInfo, SketchReport } from "../lib/api";
 import type { BuildingModel, Layers as LayerState, Opening, RoomType, Selection, Side } from "../types";
-import { ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
+import { centroid, ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
 import {
-  deleteOpening, deleteWall, setPlotSize, setRoadSide, setWallLength, setWallType, updateOpening, updateRoom,
+  addFurniture, applyPreset, deleteFurniture, deleteOpening, deleteWall, FURNITURE, OPENING_PRESETS, openingLabel, rotateFurniture,
+  setPlotSize, setRoadSide, setWallLength, setWallType, updateOpening, updateRoom, type OpeningPreset,
 } from "../lib/edit";
 import { parseLength, parseSize } from "../lib/units";
 
@@ -47,6 +48,8 @@ export function LeftPanel(props: {
   current: string | null;
   onOpen: (id: string) => void;
   onNew: (kind: "blank" | "sample") => void;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
   reading: boolean;
   report: SketchReport | null;
 }) {
@@ -120,20 +123,104 @@ export function LeftPanel(props: {
           </div>
           <ul className="flex flex-col gap-1">
             {props.projects.map((p) => (
-              <li key={p.id}>
-                <button
-                  onClick={() => props.onOpen(p.id)}
-                  className={`w-full rounded-lg px-3 py-2.5 text-left text-sm ${p.id === props.current ? "bg-brand-50 font-semibold text-brand-700" : "hover:bg-slate-50"}`}
-                >
-                  {p.name}
-                  <span className="block text-xs font-normal text-slate-500">{new Date(p.updated_at).toLocaleString()}</span>
-                </button>
-              </li>
+              <ProjectRow key={p.id} project={p} current={p.id === props.current}
+                onOpen={() => props.onOpen(p.id)} onRename={(n) => props.onRename(p.id, n)} onDelete={() => props.onDelete(p.id)} />
             ))}
           </ul>
         </div>
       )}
     </aside>
+  );
+}
+
+/** Pick a door/window type; the current one is highlighted. Sizes stay editable below. */
+function PresetPicker({ opening, onPick }: { opening: Opening; onPick: (p: OpeningPreset) => void }) {
+  const doorLike = opening.kind === "door" || opening.kind === "opening";
+  const groups = [
+    { title: "Doors", items: OPENING_PRESETS.filter((p) => p.kind === "door" || p.kind === "opening") },
+    { title: "Windows", items: OPENING_PRESETS.filter((p) => p.kind === "window" || p.kind === "ventilator") },
+  ];
+  const ft = 304.8;
+  const isCurrent = (p: OpeningPreset) =>
+    p.kind === opening.kind && (p.style === (opening.style || (opening.kind === "door" ? "single" : opening.kind === "window" ? "casement" : p.style)))
+    && Math.abs(p.size[0] * ft - opening.width) < 40;
+  return (
+    <div className="space-y-3">
+      {(doorLike ? groups : [...groups].reverse()).map((g) => (
+        <div key={g.title}>
+          <h3 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">{g.title}</h3>
+          <div className="grid grid-cols-2 gap-1.5">
+            {g.items.map((p) => (
+              <button key={p.id} onClick={() => onPick(p)} title={`${p.label}: ${p.use}`}
+                className={`flex items-center gap-2 rounded-lg border p-1.5 text-left ${isCurrent(p) ? "border-brand-500 bg-brand-50 ring-2 ring-brand-100" : "border-slate-200 hover:border-brand-300"}`}>
+                <PresetIcon style={p.style} kind={p.kind} />
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-semibold">{p.label}</span>
+                  <span className="block truncate text-[10px] text-slate-500">{p.size[0]}&apos; × {p.size[1]}&apos; · {p.use}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Small plan symbol: wall in grey, the door/window in ink. */
+function PresetIcon({ style, kind }: { style: string; kind: string }) {
+  const ink = "#1d1b2e", glass = "#4f8fd6";
+  const wall = <><rect x="0" y="17" width="6" height="6" fill="#9ca3af" /><rect x="34" y="17" width="6" height="6" fill="#9ca3af" /></>;
+  let body;
+  if (kind === "door" && style === "double") body = <><path d="M6 20 V4 M34 20 V4" stroke={ink} strokeWidth="2" /><path d="M6 4 A14 14 0 0 1 20 20 M34 4 A14 14 0 0 0 20 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "door" && style === "french") body = <><path d="M6 20 V4 M34 20 V4" stroke={glass} strokeWidth="2.5" /><path d="M6 4 A14 14 0 0 1 20 20 M34 4 A14 14 0 0 0 20 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "door" && style === "sliding") body = <><path d="M6 18 H23 M17 22 H34" stroke={ink} strokeWidth="2.5" /><path d="M24 10 h8 m-3 -3 l3 3 l-3 3" stroke={ink} fill="none" /></>;
+  else if (kind === "door") body = <><path d="M6 20 V0" stroke={ink} strokeWidth="2" /><path d="M6 0 A20 20 0 0 1 26 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "opening") body = <path d="M6 17 H34 M6 23 H34" stroke={ink} strokeDasharray="3 2" />;
+  else if (style === "fixed") body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 20 H34" stroke={glass} strokeWidth="3" /></>;
+  else if (style === "sliding_window") body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 19 H22 M18 21 H34" stroke={glass} strokeWidth="1.6" /></>;
+  else if (style === "louvered") body = <><rect x="10" y="17" width="20" height="6" fill="#fff" stroke={ink} /><path d="M13 22 l3 -4 M18 22 l3 -4 M23 22 l3 -4" stroke={glass} /></>;
+  else {
+    const n = style === "three_panel" ? 3 : 2;
+    body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 20 H34" stroke={glass} strokeWidth="1.6" />
+      {Array.from({ length: n - 1 }, (_, i) => <path key={i} d={`M${6 + (28 * (i + 1)) / n} 17 V23`} stroke={ink} />)}</>;
+  }
+  return <svg viewBox="0 0 40 26" className="h-7 w-10 shrink-0" aria-hidden>{wall}{body}</svg>;
+}
+
+function ProjectRow({ project, current, onOpen, onRename, onDelete }: {
+  project: ProjectInfo; current: boolean; onOpen: () => void; onRename: (name: string) => void; onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(project.name);
+  useEffect(() => setName(project.name), [project.name]);
+  const commit = () => {
+    setEditing(false);
+    if (name.trim() && name.trim() !== project.name) onRename(name.trim());
+    else setName(project.name);
+  };
+  return (
+    <li className={`group flex items-center gap-1 rounded-lg pr-1 ${current ? "bg-brand-50" : "hover:bg-slate-50"}`}>
+      {editing ? (
+        <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onBlur={commit} aria-label="Project name"
+          onKeyDown={(e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { setName(project.name); setEditing(false); } }}
+          className="m-1.5 min-w-0 flex-1 rounded-md border border-brand-300 px-2 py-1.5 text-sm outline-none" />
+      ) : (
+        <button onClick={onOpen} className={`min-w-0 flex-1 px-3 py-2.5 text-left text-sm ${current ? "font-semibold text-brand-700" : ""}`}>
+          <span className="block truncate">{project.name}</span>
+          <span className="block text-xs font-normal text-slate-500">{new Date(project.updated_at).toLocaleString()}</span>
+        </button>
+      )}
+      {!editing && (
+        <span className="flex opacity-60 group-hover:opacity-100 focus-within:opacity-100">
+          <button title="Rename" aria-label={`Rename ${project.name}`} onClick={() => setEditing(true)}
+            className="grid size-7 place-items-center rounded-md text-slate-500 hover:bg-white hover:text-brand-700"><Pencil size={14} /></button>
+          <button title="Delete" aria-label={`Delete ${project.name}`}
+            onClick={() => { if (window.confirm(`Delete "${project.name}"? This can't be undone.`)) onDelete(); }}
+            className="grid size-7 place-items-center rounded-md text-slate-500 hover:bg-white hover:text-red-600"><Trash2 size={14} /></button>
+        </span>
+      )}
+    </li>
   );
 }
 
@@ -181,6 +268,7 @@ export function RightPanel(props: {
   const wall = selection?.kind === "wall" ? floor.walls.find((w) => w.id === selection.id) : undefined;
   const opening = selection?.kind === "opening" ? floor.openings.find((o) => o.id === selection.id) : undefined;
   const room = selection?.kind === "room" ? floor.rooms.find((r) => r.id === selection.id) : undefined;
+  const item = selection?.kind === "furniture" ? floor.furniture.find((f) => f.id === selection.id) : undefined;
   const back = <button onClick={() => props.onSelect(null)} className="text-xs text-brand-700 hover:underline">Back to summary</button>;
 
   return (
@@ -206,12 +294,9 @@ export function RightPanel(props: {
 
         {tab === "Details" && opening && (
           <>
-            <Header title={`Selected ${title(opening.kind)}`} action={back} />
-            <div className="space-y-3 rounded-xl border border-slate-100 p-3">
-              <Field label="Type">
-                <Select value={opening.kind} options={["door", "window", "ventilator", "opening"]}
-                  onChange={(k) => onEdit(updateOpening(model, opening.id, { kind: k as Opening["kind"] }))} />
-              </Field>
+            <Header title={openingLabel(opening)} action={back} />
+            <PresetPicker opening={opening} onPick={(p) => onEdit(applyPreset(model, opening.id, p))} />
+            <div className="mt-3 space-y-3 rounded-xl border border-slate-100 p-3">
               <Field label="Width"><LengthInput value={opening.width} onCommit={(mm) => onEdit(updateOpening(model, opening.id, { width: mm }))} /></Field>
               <Field label="Height"><LengthInput value={opening.height} onCommit={(mm) => onEdit(updateOpening(model, opening.id, { height: Math.min(mm, floor.height - opening.sill) }))} /></Field>
               {opening.kind !== "door" && opening.kind !== "opening" && (
@@ -229,6 +314,28 @@ export function RightPanel(props: {
           </>
         )}
 
+        {tab === "Details" && item && (
+          <>
+            <Header title={`Selected ${FURNITURE[item.type]?.label ?? "Furniture"}`} action={back} />
+            <div className="space-y-3 rounded-xl border border-slate-100 p-3">
+              <dl className="grid grid-cols-2 gap-y-1.5 text-sm">
+                <dt className="text-slate-500">Size</dt><dd className="text-right">{ftIn(item.size[0])} × {ftIn(item.size[1])}</dd>
+                <dt className="text-slate-500">Turned</dt><dd className="text-right">{Math.round(item.rot)}°</dd>
+              </dl>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => onEdit(rotateFurniture(model, item.id, 90))} className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 py-2 text-sm font-medium hover:bg-slate-50">
+                  <RotateCcw size={15} /> Turn left
+                </button>
+                <button onClick={() => onEdit(rotateFurniture(model, item.id, -90))} className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 py-2 text-sm font-medium hover:bg-slate-50">
+                  <RotateCw size={15} /> Turn right
+                </button>
+              </div>
+              <DeleteButton label="Remove" onClick={() => { onEdit(deleteFurniture(model, item.id)); props.onSelect(null); }} />
+              <p className="text-xs text-slate-500">Drag it in the plan to move it. Shortcut: R turns it, Delete removes it.</p>
+            </div>
+          </>
+        )}
+
         {tab === "Details" && room && (
           <>
             <Header title="Selected Room" action={back} />
@@ -241,6 +348,18 @@ export function RightPanel(props: {
                 <dt className="text-slate-500">Size</dt><dd className="text-right">{roomSize(room)}</dd>
                 <dt className="text-slate-500">Area</dt><dd className="text-right">{Math.round(sqft(polygonArea(room.polygon)))} sq ft</dd>
               </dl>
+              <Field label="Add furniture">
+                <select value="" aria-label="Add furniture" className="max-w-44 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm"
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    const [next, id] = addFurniture(model, e.target.value, centroid(room.polygon));
+                    onEdit(next);
+                    props.onSelect({ kind: "furniture", id });
+                  }}>
+                  <option value="">Choose…</option>
+                  {Object.entries(FURNITURE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select>
+              </Field>
               <p className="text-xs text-slate-500">Rooms come from closed loops of walls; move the walls to resize the room.</p>
             </div>
           </>

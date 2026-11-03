@@ -58,11 +58,14 @@ def bbox(points) -> tuple[float, float, float, float]:
 
 def footprint(floor) -> tuple[float, float, float, float]:
     """Outer bounding box of the exterior walls (all walls while there are none; 0-size when empty)."""
-    ext = [w for w in floor.walls if w.type == "exterior"] or floor.walls
-    if not ext:
+    if not floor.walls:
         return 0.0, 0.0, 0.0, 0.0
-    t = max(w.thickness for w in ext) / 2
+    ext = [w for w in floor.walls if w.type == "exterior"] or floor.walls
     x0, y0, x1, y1 = bbox([p for w in ext for p in (w.a, w.b)])
+    ax0, ay0, ax1, ay1 = bbox([p for w in floor.walls for p in (w.a, w.b)])
+    if (x1 - x0) * (y1 - y0) < 0.5 * (ax1 - ax0) * (ay1 - ay0):  # outer walls only partly found
+        ext, (x0, y0, x1, y1) = floor.walls, (ax0, ay0, ax1, ay1)
+    t = max(w.thickness for w in ext) / 2
     return x0 - t, y0 - t, x1 + t, y1 + t
 
 
