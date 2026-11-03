@@ -213,11 +213,16 @@ def _constraints(labels: list[Label], grid: _Grid, walls_px, plot) -> list[_C]:
     bx = [grid.x[i] for hz, line, a, b, _ in walls_px for i in ((a, b) if hz else (line,))]
     by = [grid.y[j] for hz, line, a, b, _ in walls_px for j in ((line,) if hz else (a, b))]
     b_left, b_right, b_top, b_bottom = grid.xi(min(bx)), grid.xi(max(bx)), grid.yi(min(by)), grid.yi(max(by))
+    overall = None
     for lb in labels:
         cx, cy = lb.center
         if lb.role == "size":
-            enc = _enclosure(walls_px, grid, cx, cy)
+            enc = None if lb.overall else _enclosure(walls_px, grid, cx, cy)
             if not enc:
+                # a size not written inside a room describes the whole plot (or the house when
+                # there's no plot boundary): keep the biggest such size
+                if min(lb.value) >= 15 * MM_PER_FT and (overall is None or min(lb.value) > min(overall.value)):
+                    overall = lb
                 continue
             l, r, t, b = enc
             pw, ph = grid.x[r] - grid.x[l], grid.y[b] - grid.y[t]
@@ -243,6 +248,15 @@ def _constraints(labels: list[Label], grid: _Grid, walls_px, plot) -> list[_C]:
                 out.append(_C("x", px0, b_left, lb.value[0], f"Left margin ({fi(lb.value[0])})", weight=2.0))
             elif cx > grid.x[b_right]:
                 out.append(_C("x", b_right, px1, lb.value[0], f"Right margin ({fi(lb.value[0])})", weight=2.0))
+    if overall:
+        l, t, r, b = grid.plot if grid.plot else (b_left, b_top, b_right, b_bottom)
+        w, h = overall.value
+        pw, ph = grid.x[r] - grid.x[l], grid.y[b] - grid.y[t]
+        if (w > h) != (pw > ph):  # "30' x 55'" names the short side first on a tall drawing too
+            w, h = h, w
+        what = "Plot" if grid.plot else "House"
+        out += [_C("x", l, r, w, f"{what} width ({overall.text})", weight=3.0),
+                _C("y", t, b, h, f"{what} depth ({overall.text})", weight=3.0)]
     for c in out:
         stations = grid.x if c.axis == "x" else grid.y
         c.px = stations[c.j] - stations[c.i]
@@ -383,7 +397,7 @@ def _build_model(name, grid: _Grid, X, Y, walls_px, strokes, labels: list[Label]
     if strokes.stairs and not any(r.type == "stair" for r in rooms):
         warnings.append("Found a staircase, but it isn't closed off by walls, so it is part of a bigger room. "
                         "Draw the walls around it in the editor and set its use to Staircase.")
-    missing = [lb.room_name for lb in labels if lb.role == "room"
+    missing = [lb.room_name for lb in labels if lb.role == "room" and not lb.guessed
                and not any(Polygon(r.polygon).contains(ShPoint(to_mm(lb.center))) for r in rooms)]
     if missing:
         warnings.append(f"Could not find closed walls around: {', '.join(missing)}. Draw the missing walls in the editor.")

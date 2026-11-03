@@ -154,3 +154,15 @@ def test_rename_and_delete_project(tmp_path, monkeypatch):
     assert client.delete(f"/api/projects/{pid}").status_code == 204
     assert client.get(f"/api/projects/{pid}").status_code == 404
     assert client.delete(f"/api/projects/{pid}").status_code == 404
+
+
+def test_opening_styles_in_schedule_and_pdf():
+    from app.export_pdf import export_pdf, opening_name, opening_schedule
+    model = sample_project()
+    ops = model.floors[0].openings
+    ops[:] = [o.model_copy(update={"style": "double"}) if o.id == "D-main" else o for o in ops]
+    _, rows = opening_schedule(model.floors[0])
+    names = {opening_name(r["kind"], r["style"]) for r in rows}
+    assert {"Double door", "Single door", "Casement window", "Louvered ventilator"} <= names
+    text = PdfReader(io.BytesIO(export_pdf(model))).pages[0].extract_text()
+    assert "Double door" in text

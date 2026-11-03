@@ -48,11 +48,22 @@ def flatten_page(img: np.ndarray) -> tuple[np.ndarray, bool]:
 
 
 def ink_mask(img: np.ndarray) -> np.ndarray:
-    """Binary mask (255 = pen) robust to shadows and uneven lighting."""
+    """Binary mask (255 = pen) robust to shadows, uneven lighting, and grid or ruled paper."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     background = cv2.medianBlur(cv2.dilate(gray, np.ones((9, 9), np.uint8)), 31)
     flat = cv2.divide(gray, background, scale=255)  # paper → ~255, ink stays dark
-    _, mask = cv2.threshold(flat, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    dark = remove_printed_lines(255 - flat.astype(np.int16))
+    dark = np.clip(dark, 0, 255).astype(np.uint8)
+    _, mask = cv2.threshold(dark, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     # Otsu can pick up paper texture on very clean scans; require real contrast too
-    mask[flat > 225] = 0
+    mask[dark < 30] = 0
     return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+
+def remove_printed_lines(dark: np.ndarray) -> np.ndarray:
+    """Graph and ruled paper lines run across (nearly) the whole page, so they darken every pixel of
+    their row or column; pen strokes don't. Subtract each row's and column's low-percentile darkness.
+    Walls rarely cover 90% of a page's width, so they survive."""
+    rows = np.percentile(dark, 10, axis=1).astype(np.int16)
+    cols = np.percentile(dark, 10, axis=0).astype(np.int16)
+    return dark - rows[:, None] - cols[None, :]

@@ -19,6 +19,8 @@ class Label:
     value: tuple[float, ...] = ()  # mm: (length,) or (a, b) for sizes
     room_type: str | None = None
     room_name: str | None = None
+    guessed: bool = False  # a room name we don't recognise (e.g. "KEV"), used as written
+    overall: bool = False  # a size for the whole plot/house ("HOUSE PLAN - 18m x 25m")
 
     @property
     def center(self) -> tuple[float, float]:
@@ -93,11 +95,16 @@ _FT = r"\s*(?:'|′|’|ft\.?|feet)?"
 _INCH = r"(?:\s*-?\s*(\d+(?:\.\d+)?)\s*(?:\"|″|”|''|in))?"
 SIZE = re.compile(rf"^\s*{_NUM}{_FT}{_INCH}\s*[x×X*✕]\s*{_NUM}{_FT}{_INCH}\s*$")
 LENGTH = re.compile(rf"^\s*{_NUM}\s*(?:'|′|’|ft\.?|feet|m|mtr)\s*{_INCH}\s*$", re.I)
+_UNIT = r"\s*(?:'|′|’|ft\.?|feet|m|mtr)?"
+# a size anywhere in a longer label, e.g. "HOUSE PLAN - 18m x 25m" or "30' x 55'"
+SIZE_ANY = re.compile(rf"{_NUM}{_UNIT}{_INCH}\s*[x×X*✕]\s*{_NUM}{_UNIT}{_INCH}", re.I)
+OVERALL_WORDS = re.compile(r"plan|plot|site|house|total|overall|area", re.I)
 METRIC_HINT = re.compile(r"\d\s*m(tr)?\b", re.I)
 
 ROOM_WORDS: list[tuple[str, str, str]] = [  # (pattern, type, display name)
     (r"master\s*bed(room)?|\bm\.?b\.?r\b", "bedroom", "Master Bedroom"),
     (r"bed\s*room|\bbed\b|\bb\.?r\b|शयन", "bedroom", "Bedroom"),
+    (r"^master$|guest|kids?\b", "bedroom", "Bedroom"),
     (r"toilet|\bw\.?c\b|bath|शौचालय|स्नान", "toilet", "Toilet"),
     (r"kitchen|\bkit\b|रसोई", "kitchen", "Kitchen"),
     (r"living|hall|drawing|lounge|बैठक", "living", "Living"),
@@ -130,10 +137,11 @@ def classify(labels: list[Label]) -> list[Label]:
     for lb in labels:
         t = lb.text
         low = t.lower()
-        if m := SIZE.match(t):
+        if (m := SIZE.match(t)) or (m := SIZE_ANY.search(t)):
             metric = METRIC_HINT.search(t) and "'" not in t
             conv = (lambda v, _i: float(v) * 1000) if metric else _ft
             lb.role, lb.value = "size", (conv(m.group(1), m.group(2)), conv(m.group(3), m.group(4)))
+            lb.overall = bool(OVERALL_WORDS.search(t))
             continue
         if "road" in low:
             side = next((v for k, v in SIDES.items() if k in low), None)
@@ -162,6 +170,11 @@ def classify(labels: list[Label]) -> list[Label]:
                 if rtype == "living" and "dining" in low:
                     lb.room_name = "Living / Dining"
                 break
+    # any other short word is probably the name someone gave a room ("Kev", "Bonus", "Office")
+    for lb in labels:
+        word = re.sub(r"[^A-Za-z /&]", "", lb.text).strip()
+        if lb.role == "note" and 2 <= len(word) <= 16 and word.lower() not in ("n", "up", "dn", "floor"):
+            lb.role, lb.room_type, lb.room_name, lb.guessed = "room", "other", _title(word), True
     _attach_numbers(labels, "margin", above=True)
     _attach_numbers(labels, "gate", above=False)
     return labels

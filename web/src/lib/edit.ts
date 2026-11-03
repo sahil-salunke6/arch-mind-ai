@@ -183,3 +183,52 @@ export function rotateFurniture(model: BuildingModel, id: string, by: number) {
 export function deleteFurniture(model: BuildingModel, id: string) {
   return withFloor(model, (f) => ({ ...f, furniture: f.furniture.filter((x) => x.id !== id) }));
 }
+
+// --- door & window presets --------------------------------------------------------------------
+
+export interface OpeningPreset {
+  id: string;
+  label: string;
+  use: string; // where it's typically used, shown under the name
+  kind: Opening["kind"];
+  style: NonNullable<Opening["style"]>;
+  size: [number, number, number]; // width, height, sill in feet
+}
+
+/** Common Indian residential sizes. */
+export const OPENING_PRESETS: OpeningPreset[] = [
+  { id: "door-single", label: "Single door", use: "Bedrooms, kitchen", kind: "door", style: "single", size: [3, 7, 0] },
+  { id: "door-main", label: "Main door", use: "Entrance", kind: "door", style: "single", size: [3.5, 7, 0] },
+  { id: "door-toilet", label: "Toilet door", use: "Toilets, store", kind: "door", style: "single", size: [2.5, 7, 0] },
+  { id: "door-double", label: "Double door", use: "Living, puja, main", kind: "door", style: "double", size: [5, 7, 0] },
+  { id: "door-sliding", label: "Sliding door", use: "Balcony, terrace", kind: "door", style: "sliding", size: [6, 7, 0] },
+  { id: "door-french", label: "French door", use: "Garden, sit-out (glass)", kind: "door", style: "french", size: [5, 7, 0] },
+  { id: "win-casement", label: "Casement window", use: "Two shutters, any room", kind: "window", style: "casement", size: [4, 4, 3] },
+  { id: "win-sliding", label: "Sliding window", use: "Aluminium / uPVC", kind: "window", style: "sliding_window", size: [5, 4, 3] },
+  { id: "win-three", label: "3-panel window", use: "Living, bedrooms", kind: "window", style: "three_panel", size: [6, 4, 3] },
+  { id: "win-picture", label: "Picture window", use: "Fixed glass, views", kind: "window", style: "fixed", size: [6, 5, 2] },
+  { id: "win-kitchen", label: "Kitchen window", use: "Above the counter", kind: "window", style: "sliding_window", size: [3, 3, 3.5] },
+  { id: "vent", label: "Ventilator", use: "Toilets, stairs", kind: "ventilator", style: "louvered", size: [2, 1.5, 5.5] },
+  { id: "arch", label: "Arch opening", use: "Passages, no door", kind: "opening", style: "arch", size: [4, 7, 0] },
+];
+
+/** Name shown in schedules and the inspector. */
+export function openingLabel(o: Pick<Opening, "kind" | "style">): string {
+  const byStyle: Record<string, string> = {
+    single: "Single door", double: "Double door", sliding: "Sliding door", french: "French door",
+    casement: "Casement window", sliding_window: "Sliding window", three_panel: "3-panel window", fixed: "Picture window",
+    louvered: "Ventilator", arch: "Arch opening",
+  };
+  const byKind = { door: "Single door", window: "Casement window", ventilator: "Ventilator", opening: "Opening" };
+  return (o.style && byStyle[o.style]) || byKind[o.kind];
+}
+
+/** Swap an opening for a preset, keeping it centred where it was on its wall. */
+export function applyPreset(model: BuildingModel, id: string, preset: OpeningPreset) {
+  const o = model.floors[0].openings.find((x) => x.id === id)!;
+  const [w, h, sill] = preset.size.map((v) => v * MM_PER_FT);
+  const height = Math.min(h, model.floors[0].height - sill);
+  return updateOpening(model, id, {
+    kind: preset.kind, style: preset.style, width: w, height, sill, offset: o.offset + o.width / 2 - w / 2,
+  });
+}

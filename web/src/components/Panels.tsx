@@ -7,8 +7,8 @@ import type { ProjectInfo, SketchReport } from "../lib/api";
 import type { BuildingModel, Layers as LayerState, Opening, RoomType, Selection, Side } from "../types";
 import { centroid, ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
 import {
-  addFurniture, deleteFurniture, deleteOpening, deleteWall, FURNITURE, rotateFurniture, setPlotSize, setRoadSide, setWallLength,
-  setWallType, updateOpening, updateRoom,
+  addFurniture, applyPreset, deleteFurniture, deleteOpening, deleteWall, FURNITURE, OPENING_PRESETS, openingLabel, rotateFurniture,
+  setPlotSize, setRoadSide, setWallLength, setWallType, updateOpening, updateRoom, type OpeningPreset,
 } from "../lib/edit";
 import { parseLength, parseSize } from "../lib/units";
 
@@ -133,6 +133,61 @@ export function LeftPanel(props: {
   );
 }
 
+/** Pick a door/window type; the current one is highlighted. Sizes stay editable below. */
+function PresetPicker({ opening, onPick }: { opening: Opening; onPick: (p: OpeningPreset) => void }) {
+  const doorLike = opening.kind === "door" || opening.kind === "opening";
+  const groups = [
+    { title: "Doors", items: OPENING_PRESETS.filter((p) => p.kind === "door" || p.kind === "opening") },
+    { title: "Windows", items: OPENING_PRESETS.filter((p) => p.kind === "window" || p.kind === "ventilator") },
+  ];
+  const ft = 304.8;
+  const isCurrent = (p: OpeningPreset) =>
+    p.kind === opening.kind && (p.style === (opening.style || (opening.kind === "door" ? "single" : opening.kind === "window" ? "casement" : p.style)))
+    && Math.abs(p.size[0] * ft - opening.width) < 40;
+  return (
+    <div className="space-y-3">
+      {(doorLike ? groups : [...groups].reverse()).map((g) => (
+        <div key={g.title}>
+          <h3 className="mb-1.5 text-xs font-semibold tracking-wide text-slate-500 uppercase">{g.title}</h3>
+          <div className="grid grid-cols-2 gap-1.5">
+            {g.items.map((p) => (
+              <button key={p.id} onClick={() => onPick(p)} title={`${p.label}: ${p.use}`}
+                className={`flex items-center gap-2 rounded-lg border p-1.5 text-left ${isCurrent(p) ? "border-brand-500 bg-brand-50 ring-2 ring-brand-100" : "border-slate-200 hover:border-brand-300"}`}>
+                <PresetIcon style={p.style} kind={p.kind} />
+                <span className="min-w-0">
+                  <span className="block truncate text-xs font-semibold">{p.label}</span>
+                  <span className="block truncate text-[10px] text-slate-500">{p.size[0]}&apos; × {p.size[1]}&apos; · {p.use}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Small plan symbol: wall in grey, the door/window in ink. */
+function PresetIcon({ style, kind }: { style: string; kind: string }) {
+  const ink = "#1d1b2e", glass = "#4f8fd6";
+  const wall = <><rect x="0" y="17" width="6" height="6" fill="#9ca3af" /><rect x="34" y="17" width="6" height="6" fill="#9ca3af" /></>;
+  let body;
+  if (kind === "door" && style === "double") body = <><path d="M6 20 V4 M34 20 V4" stroke={ink} strokeWidth="2" /><path d="M6 4 A14 14 0 0 1 20 20 M34 4 A14 14 0 0 0 20 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "door" && style === "french") body = <><path d="M6 20 V4 M34 20 V4" stroke={glass} strokeWidth="2.5" /><path d="M6 4 A14 14 0 0 1 20 20 M34 4 A14 14 0 0 0 20 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "door" && style === "sliding") body = <><path d="M6 18 H23 M17 22 H34" stroke={ink} strokeWidth="2.5" /><path d="M24 10 h8 m-3 -3 l3 3 l-3 3" stroke={ink} fill="none" /></>;
+  else if (kind === "door") body = <><path d="M6 20 V0" stroke={ink} strokeWidth="2" /><path d="M6 0 A20 20 0 0 1 26 20" stroke={ink} fill="none" strokeDasharray="2 2" /></>;
+  else if (kind === "opening") body = <path d="M6 17 H34 M6 23 H34" stroke={ink} strokeDasharray="3 2" />;
+  else if (style === "fixed") body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 20 H34" stroke={glass} strokeWidth="3" /></>;
+  else if (style === "sliding_window") body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 19 H22 M18 21 H34" stroke={glass} strokeWidth="1.6" /></>;
+  else if (style === "louvered") body = <><rect x="10" y="17" width="20" height="6" fill="#fff" stroke={ink} /><path d="M13 22 l3 -4 M18 22 l3 -4 M23 22 l3 -4" stroke={glass} /></>;
+  else {
+    const n = style === "three_panel" ? 3 : 2;
+    body = <><rect x="6" y="17" width="28" height="6" fill="#fff" stroke={ink} /><path d="M6 20 H34" stroke={glass} strokeWidth="1.6" />
+      {Array.from({ length: n - 1 }, (_, i) => <path key={i} d={`M${6 + (28 * (i + 1)) / n} 17 V23`} stroke={ink} />)}</>;
+  }
+  return <svg viewBox="0 0 40 26" className="h-7 w-10 shrink-0" aria-hidden>{wall}{body}</svg>;
+}
+
 function ProjectRow({ project, current, onOpen, onRename, onDelete }: {
   project: ProjectInfo; current: boolean; onOpen: () => void; onRename: (name: string) => void; onDelete: () => void;
 }) {
@@ -239,12 +294,9 @@ export function RightPanel(props: {
 
         {tab === "Details" && opening && (
           <>
-            <Header title={`Selected ${title(opening.kind)}`} action={back} />
-            <div className="space-y-3 rounded-xl border border-slate-100 p-3">
-              <Field label="Type">
-                <Select value={opening.kind} options={["door", "window", "ventilator", "opening"]}
-                  onChange={(k) => onEdit(updateOpening(model, opening.id, { kind: k as Opening["kind"] }))} />
-              </Field>
+            <Header title={openingLabel(opening)} action={back} />
+            <PresetPicker opening={opening} onPick={(p) => onEdit(applyPreset(model, opening.id, p))} />
+            <div className="mt-3 space-y-3 rounded-xl border border-slate-100 p-3">
               <Field label="Width"><LengthInput value={opening.width} onCommit={(mm) => onEdit(updateOpening(model, opening.id, { width: mm }))} /></Field>
               <Field label="Height"><LengthInput value={opening.height} onCommit={(mm) => onEdit(updateOpening(model, opening.id, { height: Math.min(mm, floor.height - opening.sill) }))} /></Field>
               {opening.kind !== "door" && opening.kind !== "opening" && (

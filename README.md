@@ -51,6 +51,8 @@ In the 2D plan, choose a tool from the toolbar (keyboard shortcut in brackets):
 - **Wall (W)**: click to start, click for each corner; walls snap to 90°, to other walls and to 3" steps.
   Click the start point or double-click to finish, Esc to stop, hold Shift for any angle.
 - **Door (D) / Window (N)**: click on a wall.
+- **Doors & windows**: select one to pick a type (single, main, toilet, double, sliding or French door; casement,
+  sliding, 3-panel, picture or kitchen window; ventilator; arch). Drag the small handles at its ends to resize it.
 - **Furniture**: click a piece to select it, drag to move it; R turns it 90° (Shift+R the other way).
   Add furniture to a room from the room's panel (select the room, then *Add furniture*).
 - Delete removes the selected wall, opening or furniture; Ctrl+Z / Ctrl+Y undo and redo.

@@ -12,10 +12,16 @@ export interface Wall {
   assembly: string | null;
 }
 
+export type OpeningStyle =
+  | "" | "single" | "double" | "sliding" | "french"
+  | "casement" | "sliding_window" | "three_panel" | "fixed"
+  | "louvered" | "arch";
+
 export interface Opening {
   id: string;
   wall: string;
   kind: "door" | "window" | "opening" | "ventilator";
+  style?: OpeningStyle;
   offset: number;
   width: number;
   height: number;

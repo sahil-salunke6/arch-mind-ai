@@ -54,6 +54,12 @@ def find_strokes(mask: np.ndarray, text_polys: list[np.ndarray] = ()) -> Strokes
     outer = rects[0] if rects else None
     plot = outer if outer and any(_strictly_inside(r, outer, 0.02 * L) for r in rects[1:]) else None
     keep_in = plot or outer
+    # an L-shaped or irregular house has no closed outer rectangle; the largest rectangle found is
+    # then just one wing, and trimming to it would throw the rest of the house away
+    if keep_in and not plot:
+        inside = sum(s.length for s in segs if _within(s, keep_in, 0.012 * L))
+        if inside < 0.8 * sum(s.length for s in segs):
+            keep_in = None
     if keep_in:
         walls = [s for s in segs if _within(s, keep_in, 0.012 * L) and not (plot and _on_rect(s, plot, 0.012 * L))]
     else:
