@@ -390,8 +390,17 @@ export function RightPanel(props: {
 
         {tab === "Layers" && (
           <ul className="space-y-1">
+            <li>
+              <label className="flex items-center justify-between rounded-lg px-2 py-2.5 text-sm">
+                <span className="flex items-center gap-2"><Layers size={16} className="text-slate-500" /> 3D roof & walls</span>
+                <select value={props.layers.cut} onChange={(e) => props.onLayers({ ...props.layers, cut: e.target.value as LayerState["cut"] })}
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm">
+                  <option value="auto">Auto</option><option value="roof">Roof</option>
+                  <option value="open">Cutaway</option><option value="doll">Doll-house</option>
+                </select>
+              </label>
+            </li>
             {([
-              ["roof", "Roof & parapet"],
               ["furniture", "Furniture"],
               ["labels", "Room labels (2D)"],
               ["dimensions", "Dimensions & margins (2D)"],

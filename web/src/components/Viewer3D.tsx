@@ -67,7 +67,10 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
   const fp = footprint(model);
   const base = floor.plinth;
   const showGround = view !== "Bottom";
-  const showRoof = layers.roof && view !== "Top";
+  const elevation = ["North", "South", "East", "West", "Bottom"].includes(view);
+  const cut = layers.cut === "auto" ? (elevation ? "roof" : "open") : layers.cut;
+  const showRoof = cut === "roof" && view !== "Top";
+  const wallTop = cut === "doll" ? DOLL_HEIGHT : floor.height;
 
   return (
     <group>
@@ -107,9 +110,12 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
       )}
 
       {floor.walls.map((w) => (
-        <WallMesh key={w.id} model={model} wall={w} selected={selectedWall === w.id} onSelect={onSelectWall} />
+        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id} onSelect={onSelectWall} />
       ))}
-      {floor.openings.map((o) => <OpeningMesh key={o.id} model={model} opening={o} />)}
+      {floor.openings.map((o) => {
+        const shown = wallTop < floor.height ? clipOpening(o, wallTop) : o;
+        return shown.height > 0 && <OpeningMesh key={o.id} model={model} opening={shown} cut={wallTop < floor.height} />;
+      })}
       {layers.furniture && floor.furniture.map((f) => <FurnitureMesh key={f.id} model={model} f={f} />)}
 
       {showRoof && fp.w > 0 && (
@@ -157,7 +163,16 @@ function Box({ at, size, color, rotY = 0, ...rest }: {
   );
 }
 
-function WallMesh({ model, wall, selected, onSelect }: { model: BuildingModel; wall: Wall; selected: boolean; onSelect: (id: string) => void }) {
+const DOLL_HEIGHT = 1219; // 4 ft
+
+/** Doll-house view: an opening only shows the part below the cut. */
+function clipOpening(o: Opening, top: number): Opening {
+  return { ...o, height: Math.max(0, Math.min(o.height, top - o.sill)) };
+}
+
+function WallMesh({ model, wall, top, selected, onSelect }: {
+  model: BuildingModel; wall: Wall; top: number; selected: boolean; onSelect: (id: string) => void;
+}) {
   const S = useToScene(model);
   const floor = model.floors[0];
   const { u } = wallFrame(wall);
@@ -172,10 +187,11 @@ function WallMesh({ model, wall, selected, onSelect }: { model: BuildingModel; w
     if (o.sill > 0) pieces.push([o.offset, o.offset + o.width, 0, o.sill]);
     if (o.sill + o.height < H) pieces.push([o.offset, o.offset + o.width, o.sill + o.height, H]);
   }
+  const visible = pieces.filter(([, , z0]) => z0 < top).map(([s0, s1, z0, z1]) => [s0, s1, z0, Math.min(z1, top)] as const);
   const click = (e: { stopPropagation: () => void }) => { e.stopPropagation(); onSelect(wall.id); };
   return (
     <group>
-      {pieces.map(([s0, s1, z0, z1], i) => (
+      {visible.map(([s0, s1, z0, z1], i) => (
         <Box key={i} at={S(pointOnWall(wall, (s0 + s1) / 2), base + (z0 + z1) / 2)} size={[s1 - s0, z1 - z0, wall.thickness]}
           rotY={rotY} color={color} onClick={click} />
       ))}
@@ -183,7 +199,7 @@ function WallMesh({ model, wall, selected, onSelect }: { model: BuildingModel; w
   );
 }
 
-function OpeningMesh({ model, opening: o }: { model: BuildingModel; opening: Opening }) {
+function OpeningMesh({ model, opening: o, cut = false }: { model: BuildingModel; opening: Opening; cut?: boolean }) {
   const S = useToScene(model);
   const floor = model.floors[0];
   const wall = floor.walls.find((w) => w.id === o.wall)!;
@@ -216,7 +232,7 @@ function OpeningMesh({ model, opening: o }: { model: BuildingModel; opening: Ope
           <Box key={i} at={at(mid, o.sill + ((i + 0.5) * o.height) / slats)} size={[o.width, 25, 70]} rotY={rotY} color="#d6d3cc" />
         ))}
         <Box at={at(mid, o.sill - 25)} size={[o.width + 100, 50, wall.thickness + 60]} rotY={rotY} color="#5b5d66" />
-        <Box at={at(mid, o.sill + o.height + 40)} size={[o.width + 300, 80, wall.thickness + 250]} rotY={rotY} color="#d9d4ca" />
+        {!cut && <Box at={at(mid, o.sill + o.height + 40)} size={[o.width + 300, 80, wall.thickness + 250]} rotY={rotY} color="#d9d4ca" />}
       </group>
     );
   }
