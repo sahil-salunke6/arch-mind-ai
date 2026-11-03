@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Box as BoxIcon, Maximize2, SquareDashed } from "lucide-react";
 import { api, type ProjectInfo } from "./lib/api";
-import { VIEWS, type BuildingModel, type Layers, type ViewName } from "./types";
-import { DownloadMenu, Stepper, TopNav } from "./components/Chrome";
+import { VIEWS, type BuildingModel, type Layers, type Selection, type Tool, type ViewName } from "./types";
+import { DownloadMenu, Stepper, TopNav, type SaveStatus } from "./components/Chrome";
+import { blankProject, deleteOpening, deleteWall } from "./lib/edit";
+import { useHistory } from "./lib/history";
 import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
 import SketchView from "./components/SketchView";
@@ -13,7 +15,14 @@ type Layout = "Compare" | "2D Plan" | "3D Model";
 export default function App() {
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null);
-  const [model, setModel] = useState<BuildingModel | null>(null);
+  const history = useHistory<BuildingModel>(null);
+  const model = history.present;
+  const [status, setStatus] = useState<SaveStatus>("saved");
+  const dirty = useRef(false);
+  const saving = useRef(false);
+  const [saveTick, setSaveTick] = useState(0);
+  const latest = useRef<BuildingModel | null>(null);
+  latest.current = model;
   const [error, setError] = useState<string | null>(null);
   const [upload, setUpload] = useState<Upload | null>(null);
   const [prompt, setPrompt] = useState("");
@@ -22,26 +31,104 @@ export default function App() {
   const [view, setView] = useState<ViewName>("NE");
   const [mode, setMode] = useState<"2d" | "3d">("3d");
   const [layers, setLayers] = useState<Layers>({ roof: false, furniture: true, labels: true, dimensions: true });
-  const [selectedWall, setSelectedWall] = useState<string | null>(null);
+  const [rawSelection, setSelection] = useState<Selection>(null);
+  const [tool, setTool] = useState<Tool>("select");
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [thumbs, setThumbs] = useState<Partial<Record<ViewName, string>>>({});
 
   const open = useCallback(async (id: string) => {
     try {
-      setModel(await api.get(id));
+      history.reset(await api.get(id));
+      dirty.current = false;
+      setStatus("saved");
       setProjectId(id);
-      setSelectedWall(null);
+      setSelection(null);
       setThumbs({});
     } catch (e) {
       setError(`Could not load the project (${e}). Is the API running on port 8000?`);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const refreshList = useCallback(() => api.list().then(setProjects), []);
 
   useEffect(() => {
     api.list()
       .then((list) => { setProjects(list); if (list[0]) open(list[0].id); })
       .catch((e) => setError(`Could not reach the API (${e}). Start it with: npm run api`));
   }, [open]);
+
+  /** All edits go through here. commit=false updates the current undo step (live drags). */
+  const edit = useCallback((next: BuildingModel, commit = true) => {
+    if (commit) history.commit(next);
+    else history.replace(next);
+    dirty.current = true;
+    setStatus("unsaved");
+  }, [history.commit, history.replace]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const undo = () => { history.undo(); dirty.current = true; setStatus("unsaved"); };
+  const redo = () => { history.redo(); dirty.current = true; setStatus("unsaved"); };
+
+  // Autosave shortly after the last edit. The server re-derives rooms from the walls; take its rooms
+  // only if the walls haven't changed again in the meantime.
+  useEffect(() => {
+    if (!dirty.current || !model || !projectId) return;
+    const t = setTimeout(async () => {
+      // one save at a time: a newer edit waits for this one, then saves on top of its rooms
+      if (saving.current) { setSaveTick((n) => n + 1); return; }
+      saving.current = true;
+      dirty.current = false;
+      setStatus("saving");
+      const sentWalls = JSON.stringify(model.floors[0].walls);
+      try {
+        const saved = await api.save(projectId, model);
+        const now = latest.current;
+        if (now && JSON.stringify(now.floors[0].walls) === sentWalls) {
+          history.replace({ ...now, floors: [{ ...now.floors[0], rooms: saved.floors[0].rooms }, ...now.floors.slice(1)] });
+        }
+        if (!dirty.current) setStatus("saved");
+        refreshList();
+      } catch {
+        dirty.current = true;
+        setStatus("error");
+      } finally {
+        saving.current = false;
+        if (dirty.current) setSaveTick((n) => n + 1);
+      }
+    }, 700);
+    return () => clearTimeout(t);
+  }, [model, projectId, saveTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Drop a selection whose element no longer exists (deleted, undone, room re-derived).
+  const selection = useMemo<Selection>(() => {
+    if (!rawSelection || !model) return null;
+    const f = model.floors[0];
+    const list = { wall: f.walls, opening: f.openings, room: f.rooms }[rawSelection.kind];
+    return list.some((x) => x.id === rawSelection.id) ? rawSelection : null;
+  }, [rawSelection, model]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof Element && e.target.closest("input, textarea, select")) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
+      else if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
+      else if ((e.key === "Delete" || e.key === "Backspace") && selection && model) {
+        if (selection.kind === "wall") edit(deleteWall(model, selection.id));
+        if (selection.kind === "opening") edit(deleteOpening(model, selection.id));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  const newProject = async (kind: "blank" | "sample") => {
+    if (!model) return;
+    const { id } = kind === "blank" ? await api.create(blankProject(model, "New Plot 30x40")) : await api.createFromSample();
+    await refreshList();
+    await open(id);
+    if (kind === "blank") { setLayout("2D Plan"); setTool("wall"); }
+  };
 
   const pickView = (v: ViewName) => {
     setView(v);
@@ -67,6 +154,16 @@ export default function App() {
     );
   };
 
+  /** Exports are rendered from the saved model, so flush pending edits first. */
+  const exportFile = async (url: string, filename: string) => {
+    if (model && projectId && status !== "saved") {
+      dirty.current = false;
+      await api.save(projectId, model);
+      setStatus("saved");
+    }
+    download(url, filename);
+  };
+
   const savePng = () => {
     if (!canvas || !model) return;
     download(canvas.toDataURL("image/png"), `${model.name} - ${view}.png`);
@@ -86,12 +183,12 @@ export default function App() {
 
   return (
     <div className="flex min-h-full flex-col">
-      <TopNav projects={projects} current={projectId} onOpen={open} />
+      <TopNav projects={projects} current={projectId} onOpen={open} status={status} />
       <main className="grid flex-1 gap-4 p-4 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)_310px]">
         <LeftPanel
           upload={upload} onUpload={onUpload} onClear={() => { if (upload) URL.revokeObjectURL(upload.url); setUpload(null); }}
           prompt={prompt} onPrompt={setPrompt} onGenerate={onGenerate} notice={notice}
-          projects={projects} current={projectId} onOpen={open}
+          projects={projects} current={projectId} onOpen={open} onNew={newProject}
         />
 
         <section className="flex min-w-0 flex-col gap-3">
@@ -113,15 +210,20 @@ export default function App() {
               </Card>
             )}
             {show2D && (
-              <Card title="2D Floor Plan (Generated)" onExpand={layout === "Compare" ? () => setLayout("2D Plan") : undefined}>
-                <PlanView2D model={model} layers={layers} selectedWall={selectedWall} onSelectWall={setSelectedWall} />
+              <Card title="2D Floor Plan" onExpand={layout === "Compare" ? () => setLayout("2D Plan") : undefined}>
+                <PlanView2D
+                  model={model} layers={layers} selection={selection} onSelect={setSelection}
+                  editable tool={tool} onTool={setTool} onEdit={edit}
+                  history={{ undo, redo, canUndo: history.canUndo, canRedo: history.canRedo }}
+                />
               </Card>
             )}
             {show3D && (
               <Card title={`3D Model · ${view} view`} accent onExpand={layout === "Compare" ? () => setLayout("3D Model") : undefined}>
                 <Viewer3D
                   model={model} layers={layers} view={view} mode={mode}
-                  selectedWall={selectedWall} onSelectWall={setSelectedWall}
+                  selectedWall={selection?.kind === "wall" ? selection.id : null}
+                  onSelectWall={(id) => setSelection(id ? { kind: "wall", id } : null)}
                   onCanvas={setCanvas} onThumbnails={setThumbs}
                 />
               </Card>
@@ -155,11 +257,11 @@ export default function App() {
         <div className="lg:col-span-2 xl:col-span-1">
           <RightPanel
             model={model} layers={layers} onLayers={setLayers}
-            selectedWall={selectedWall} onSelectWall={setSelectedWall}
+            selection={selection} onSelect={setSelection} onEdit={edit}
             footer={
               <DownloadMenu items={[
-                { label: "Blueprint set (.pdf, A3)", onClick: () => projectId && download(api.pdfUrl(projectId), `${model.name}.pdf`) },
-                { label: "CAD plan (.dxf)", onClick: () => projectId && download(api.dxfUrl(projectId), `${model.name}.dxf`) },
+                { label: "Blueprint set (.pdf, A3)", onClick: () => projectId && exportFile(api.pdfUrl(projectId), `${model.name}.pdf`) },
+                { label: "CAD plan (.dxf)", onClick: () => projectId && exportFile(api.dxfUrl(projectId), `${model.name}.dxf`) },
                 { label: `Current view (${view}) as PNG`, onClick: savePng },
                 { label: "Building model (.json)", onClick: saveJson },
               ]} />

@@ -81,7 +81,12 @@ export function viewDirection(model: BuildingModel, view: ViewName): Point | nul
 }
 
 export function footprint(model: BuildingModel) {
-  const ext = model.floors[0].walls.filter((w) => w.type === "exterior");
+  const all = model.floors[0].walls;
+  const ext = all.some((w) => w.type === "exterior") ? all.filter((w) => w.type === "exterior") : all;
+  if (!ext.length) {
+    const p = bbox(model.plot.polygon);
+    return { ...p, x0: p.cx, x1: p.cx, y0: p.cy, y1: p.cy, w: 0, h: 0 };
+  }
   const t = Math.max(...ext.map((w) => w.thickness)) / 2;
   const b = bbox(ext.flatMap((w) => [w.a, w.b]));
   return { ...b, x0: b.x0 - t, x1: b.x1 + t, y0: b.y0 - t, y1: b.y1 + t, w: b.w + 2 * t, h: b.h + 2 * t };
@@ -139,4 +144,23 @@ export function stairLayout(room: Room, rise: number): Tread[] {
   for (let i = 0; i < n; i++)
     out.push({ rect: rect(run - (i + 1) * tread, run - i * tread, short / 2, short), top: (n + 2 + i) * r, flight: 1 });
   return out;
+}
+
+/** Area-weighted centroid (falls back to the bbox centre for degenerate shapes). */
+export function centroid(pts: Point[]): Point {
+  let a = 0, cx = 0, cy = 0;
+  pts.forEach(([x0, y0], i) => {
+    const [x1, y1] = pts[(i + 1) % pts.length];
+    const f = x0 * y1 - x1 * y0;
+    a += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f;
+  });
+  if (Math.abs(a) < 1e-6) { const b = bbox(pts); return [b.cx, b.cy]; }
+  return [cx / (3 * a), cy / (3 * a)];
+}
+
+/** Distance along the wall of the foot of the perpendicular from p, and that distance from the wall line. */
+export function projectOnWall(w: Wall, p: Point): { s: number; dist: number } {
+  const { u, n } = wallFrame(w);
+  const dx = p[0] - w.a[0], dy = p[1] - w.a[1];
+  return { s: dx * u[0] + dy * u[1], dist: Math.abs(dx * n[0] + dy * n[1]) };
 }

@@ -57,8 +57,10 @@ def bbox(points) -> tuple[float, float, float, float]:
 
 
 def footprint(floor) -> tuple[float, float, float, float]:
-    """Outer bounding box of the exterior walls."""
-    ext = [w for w in floor.walls if w.type == "exterior"]
+    """Outer bounding box of the exterior walls (all walls while there are none; 0-size when empty)."""
+    ext = [w for w in floor.walls if w.type == "exterior"] or floor.walls
+    if not ext:
+        return 0.0, 0.0, 0.0, 0.0
     t = max(w.thickness for w in ext) / 2
     x0, y0, x1, y1 = bbox([p for w in ext for p in (w.a, w.b)])
     return x0 - t, y0 - t, x1 + t, y1 + t

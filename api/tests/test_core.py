@@ -83,3 +83,62 @@ def test_opening_schedule_groups_identical_openings():
     assert codes["D-bed1"] == codes["D-bed2"] == codes["D-bed3"]
     assert by_code[codes["D-bed1"]]["count"] == 4
     assert sum(r["count"] for r in rows) == len(codes)
+
+
+def test_detect_rooms_keeps_names_when_walls_move():
+    from app.rooms import detect_rooms
+    model = sample_project()
+    floor = model.floors[0]
+    names = sorted(r.name for r in floor.rooms)
+    assert sorted(r.name for r in detect_rooms(floor)) == names
+
+    # shift the living/kitchen partition (x = 25 ft) by 1 ft: names stay, areas change
+    walls = [w.model_copy(update={"a": (w.a[0] + 304.8, w.a[1]), "b": (w.b[0] + 304.8, w.b[1])}) if w.id == "W9" else w
+             for w in floor.walls]
+    rooms = {r.name: r for r in detect_rooms(floor.model_copy(update={"walls": walls}))}
+    assert sorted(rooms) == names
+    assert sqft(rooms["Living / Dining"].area) == pytest.approx(420)
+
+
+def test_new_loop_becomes_unnamed_room():
+    from app.model import Floor, Wall
+    from app.rooms import detect_rooms
+    sq = [(0, 0), (4000, 0), (4000, 3000), (0, 3000)]
+    walls = [Wall(id=f"W{i}", a=sq[i], b=sq[(i + 1) % 4], thickness=115, type="interior") for i in range(4)]
+    rooms = detect_rooms(Floor(walls=walls))
+    assert [(r.name, r.type) for r in rooms] == [("Room 1", "other")]
+    assert rooms[0].area == pytest.approx(12e6)
+
+
+def test_blank_project_exports(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "store", ProjectStore(tmp_path / "t.db"))
+    client = TestClient(main.app)
+    blank = sample_project().model_dump()
+    blank["name"] = "Blank"
+    blank["floors"][0].update(walls=[], openings=[], rooms=[], furniture=[])
+    pid = client.post("/api/projects", json=blank).json()["id"]
+    assert client.get(f"/api/projects/{pid}/export.pdf").status_code == 200
+    assert client.get(f"/api/projects/{pid}/export.dxf").status_code == 200
+
+
+def test_new_rooms_get_unused_names():
+    from app.model import Floor, Room, Wall
+    from app.rooms import detect_rooms
+    # 8 m x 3 m box split in two; the left half is already "Room 1"
+    pts = [(0, 0), (8000, 0), (8000, 3000), (0, 3000)]
+    walls = [Wall(id=f"W{i}", a=pts[i], b=pts[(i + 1) % 4], thickness=115, type="interior") for i in range(4)]
+    walls.append(Wall(id="W5", a=(4000, 0), b=(4000, 3000), thickness=115, type="interior"))
+    left = Room(id="R-a", name="Room 1", type="other", polygon=[(0, 0), (4000, 0), (4000, 3000), (0, 3000)])
+    names = sorted(r.name for r in detect_rooms(Floor(walls=walls, rooms=[left])))
+    assert names == ["Room 1", "Room 2"]
+
+
+def test_room_names_are_unique_even_with_duplicate_input():
+    from app.model import Floor, Room, Wall
+    from app.rooms import detect_rooms
+    pts = [(0, 0), (8000, 0), (8000, 3000), (0, 3000)]
+    walls = [Wall(id=f"W{i}", a=pts[i], b=pts[(i + 1) % 4], thickness=115, type="interior") for i in range(4)]
+    walls.append(Wall(id="W5", a=(4000, 0), b=(4000, 3000), thickness=115, type="interior"))
+    halves = [[(0, 0), (4000, 0), (4000, 3000), (0, 3000)], [(4000, 0), (8000, 0), (8000, 3000), (4000, 3000)]]
+    same = [Room(id=f"R-{i}", name="Bedroom", type="bedroom", polygon=p) for i, p in enumerate(halves)]
+    assert sorted(r.name for r in detect_rooms(Floor(walls=walls, rooms=same))) == ["Bedroom", "Bedroom (2)"]

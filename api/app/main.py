@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from .export_dxf import export_dxf
 from .export_pdf import export_pdf
 from .model import BuildingModel
+from .rooms import detect_rooms
 from .sample import sample_project
 from .store import ProjectStore
 
@@ -27,7 +28,7 @@ def list_projects() -> list[dict]:
 
 @app.post("/api/projects", status_code=201)
 def create_project(model: BuildingModel | None = None) -> Created:
-    return Created(id=store.create(model or sample_project()))
+    return Created(id=store.create(_with_rooms(model) if model else sample_project()))
 
 
 @app.get("/api/projects/{id}")
@@ -39,9 +40,16 @@ def get_project(id: str) -> BuildingModel:
 
 @app.put("/api/projects/{id}")
 def save_project(id: str, model: BuildingModel) -> BuildingModel:
+    """Saves the model; rooms are re-derived from the walls and returned to the editor."""
+    model = _with_rooms(model)
     if not store.save(id, model):
         raise HTTPException(404, "project not found")
     return model
+
+
+def _with_rooms(model: BuildingModel) -> BuildingModel:
+    floors = [f.model_copy(update={"rooms": detect_rooms(f)}) for f in model.floors]
+    return model.model_copy(update={"floors": floors})
 
 
 def _attachment(model: BuildingModel, content: bytes, ext: str, media_type: str) -> Response:

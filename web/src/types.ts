@@ -25,7 +25,7 @@ export interface Opening {
 
 export type RoomType =
   | "bedroom" | "toilet" | "kitchen" | "living" | "dining" | "stair"
-  | "parking" | "foyer" | "puja" | "utility" | "balcony" | "store";
+  | "parking" | "foyer" | "puja" | "utility" | "balcony" | "store" | "other";
 
 export interface Room {
   id: string;
@@ -78,6 +78,9 @@ export interface BuildingModel {
   roof: { type: string; parapet: number };
   assemblies: Record<string, Assembly>;
 }
+
+export type Selection = { kind: "wall" | "opening" | "room"; id: string } | null;
+export type Tool = "select" | "wall" | "door" | "window";
 
 export type ViewName = "North" | "South" | "East" | "West" | "NE" | "NW" | "SE" | "SW" | "Top" | "Bottom";
 export const VIEWS: ViewName[] = ["North", "South", "East", "West", "NE", "NW", "SE", "SW", "Top", "Bottom"];

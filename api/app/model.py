@@ -54,7 +54,7 @@ class Opening(BaseModel):
 
 RoomType = Literal[
     "bedroom", "toilet", "kitchen", "living", "dining", "stair",
-    "parking", "foyer", "puja", "utility", "balcony", "store",
+    "parking", "foyer", "puja", "utility", "balcony", "store", "other",
 ]
 
 

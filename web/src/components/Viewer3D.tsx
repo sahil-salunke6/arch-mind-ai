@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera, RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
-import type { BuildingModel, Furniture, Layers, Opening, Point, ViewName, Wall } from "../types";
+import type { BuildingModel, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
 import { bbox, footprint, pointOnWall, solidSpans, stairLayout, viewDirection, wallFrame } from "../lib/geometry";
 
 const M = 1 / 1000; // model mm → scene metres
@@ -95,12 +95,9 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
       )}
 
       {/* Plinth */}
-      <Box at={S([fp.cx, fp.cy], base / 2)} size={[fp.w, base, fp.h]} color="#cfc9bd" />
+      {fp.w > 0 && <Box at={S([fp.cx, fp.cy], base / 2)} size={[fp.w, base, fp.h]} color="#cfc9bd" />}
 
-      {floor.rooms.map((r) => {
-        const b = bbox(r.polygon);
-        return <Box key={r.id} at={S([b.cx, b.cy], base + 10)} size={[b.w, 20, b.h]} color={FLOOR_COLORS[r.type] ?? "#e5e0d6"} />;
-      })}
+      {floor.rooms.map((r) => <RoomFloor key={r.id} model={model} room={r} />)}
 
       {floor.rooms.filter((r) => r.type === "stair").flatMap((r) =>
         stairLayout(r, floor.height).map((t, i) => {
@@ -115,7 +112,7 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
       {floor.openings.map((o) => <OpeningMesh key={o.id} model={model} opening={o} />)}
       {layers.furniture && floor.furniture.map((f) => <FurnitureMesh key={f.id} model={model} f={f} />)}
 
-      {showRoof && (
+      {showRoof && fp.w > 0 && (
         <group>
           <Box at={S([fp.cx, fp.cy], base + floor.height + floor.slab / 2)} size={[fp.w + 300, floor.slab, fp.h + 300]} color="#efece6" />
           {[
@@ -130,6 +127,21 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
         </group>
       )}
     </group>
+  );
+}
+
+/** Room floor finish as an extruded polygon, so L-shaped rooms render correctly. */
+function RoomFloor({ model, room }: { model: BuildingModel; room: Room }) {
+  const p = bbox(model.plot.polygon);
+  const geometry = useMemo(() => {
+    const shape = new THREE.Shape(room.polygon.map(([x, y]) => new THREE.Vector2((x - p.cx) * M, (y - p.cy) * M)));
+    return new THREE.ExtrudeGeometry(shape, { depth: 20 * M, bevelEnabled: false });
+  }, [room.polygon, p.cx, p.cy]);
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return (
+    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, model.floors[0].plinth * M, 0]} receiveShadow>
+      <meshStandardMaterial color={FLOOR_COLORS[room.type] ?? "#e5e0d6"} roughness={0.85} />
+    </mesh>
   );
 }
 

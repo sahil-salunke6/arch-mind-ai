@@ -10,7 +10,11 @@ const NAV = [
   { label: "Export", icon: LayoutGrid },
 ];
 
-export function TopNav({ projects, current, onOpen }: { projects: ProjectInfo[]; current: string | null; onOpen: (id: string) => void }) {
+export type SaveStatus = "saved" | "saving" | "unsaved" | "error";
+
+export function TopNav({ projects, current, onOpen, status }: {
+  projects: ProjectInfo[]; current: string | null; onOpen: (id: string) => void; status: SaveStatus;
+}) {
   return (
     <header className="flex h-16 shrink-0 items-center gap-4 border-b border-black/5 bg-white px-4 lg:px-6">
       <div className="flex items-center gap-2">
@@ -43,9 +47,13 @@ export function TopNav({ projects, current, onOpen }: { projects: ProjectInfo[];
           </select>
           <ChevronDown size={16} className="pointer-events-none absolute right-3 text-slate-500" />
         </label>
-        <span className="hidden items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium md:flex">
-          <span className="grid size-4 place-items-center rounded-full bg-emerald-500 text-white"><Check size={11} strokeWidth={3} /></span>
-          Saved
+        <span className="hidden items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-medium md:flex" aria-live="polite">
+          {status === "saved" ? (
+            <span className="grid size-4 place-items-center rounded-full bg-emerald-500 text-white"><Check size={11} strokeWidth={3} /></span>
+          ) : (
+            <span className={`size-2.5 rounded-full ${status === "error" ? "bg-red-500" : "animate-pulse bg-amber-400"}`} />
+          )}
+          {{ saved: "Saved", saving: "Saving…", unsaved: "Unsaved", error: "Not saved" }[status]}
         </span>
         <Bell size={20} className="hidden text-slate-600 md:block" />
         <CircleHelp size={20} className="hidden text-slate-600 md:block" />
