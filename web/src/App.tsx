@@ -345,7 +345,7 @@ function ExploreBar({ model, focus, walking, onFocus, onWalk }: {
         <option value="outside">Outside (eye level)</option>
         {model.floors[0].rooms.map((r) => <option key={r.id} value={r.id}>Inside: {r.name}</option>)}
       </select>
-      <button onClick={() => onWalk(!walking)}
+      <button onClick={(e) => { e.currentTarget.blur(); onWalk(!walking); }}
         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold shadow-sm ${walking ? "bg-brand-600 text-white" : "border border-slate-200 bg-white/95 text-slate-700 hover:bg-slate-50"}`}>
         {walking ? "Stop walking" : "Walk"}
       </button>

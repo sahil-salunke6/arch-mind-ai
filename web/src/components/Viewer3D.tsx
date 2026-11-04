@@ -31,7 +31,9 @@ interface Props {
 const EYE = 1600; // mm above the floor
 
 export default function Viewer3D(props: Props) {
-  const { model, mode } = props;
+  const { model } = props;
+  // walking and looking around inside need perspective; the flat 2D camera only suits the 10 views
+  const mode = props.walking || props.focus ? "3d" : props.mode;
   return (
     <Canvas
       shadows
@@ -46,10 +48,11 @@ export default function Viewer3D(props: Props) {
       {props.walking ? (
         <Walker model={model} focus={props.focus ?? null} />
       ) : (
-        <OrbitControls key={`${mode}-${focusKey(props.focus)}`} makeDefault enableDamping dampingFactor={0.12} {...orbitLimits(model, props.focus ?? null)} />
+        <OrbitControls key={`${mode}-${focusKey(props.focus)}`} makeDefault enableDamping dampingFactor={0.12} zoomSpeed={1.6} {...orbitLimits(model, props.focus ?? null)} />
       )}
-      {!props.walking && <CameraRig model={model} view={props.view} mode={mode} focus={props.focus ?? null} />}
+      {!props.walking && <CameraRig key={mode} model={model} view={props.view} mode={mode} focus={props.focus ?? null} />}
       <Thumbnails model={model} onThumbnails={props.onThumbnails} />
+      {import.meta.env.DEV && <DevHook />}
 
       <hemisphereLight args={["#ffffff", "#c3ccb4", 1.1]} />
       <directionalLight
@@ -57,7 +60,7 @@ export default function Viewer3D(props: Props) {
         shadow-mapSize={[2048, 2048]} shadow-bias={-0.0004}
         shadow-camera-left={-30} shadow-camera-right={30} shadow-camera-top={30} shadow-camera-bottom={-30}
       />
-      <Site {...props} />
+      <Site {...props} mode={mode} />
     </Canvas>
   );
 }
@@ -460,23 +463,38 @@ function orbitLimits(model: BuildingModel, focus: Focus) {
 
 function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: ViewName; mode: "2d" | "3d"; focus: Focus }) {
   const { camera, controls, size } = useThree() as unknown as {
-    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera; controls: { target: THREE.Vector3; update: () => void } | null;
+    camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
+    controls: (THREE.EventDispatcher<{ start: object }> & { target: THREE.Vector3; update: () => void }) | null;
     size: { width: number; height: number };
   };
-  const goal = useRef<{ pos: THREE.Vector3; target: THREE.Vector3; zoom: number } | null>(null);
+  const goal = useRef<{ pos: THREE.Vector3; target: THREE.Vector3; zoom: number; until: number } | null>(null);
+  const plotKey = JSON.stringify(model.plot.polygon);
+  const ready = size.width > 80 && size.height > 80; // the panel is still laying out below this
+  const fKey = focusKey(focus);
 
+  // Fly to a view only when the user picks one (view, 2D/3D, room focus) or the plot changes,
+  // not on every autosave or panel resize, so zoom and rotation aren't snapped back.
   useEffect(() => {
+    if (!ready) return;
     const p = bbox(model.plot.polygon);
     const extent = Math.max(p.w, p.h) * M * 1.1;
-    const pose = focusPose(model, focus);
-    goal.current = { ...(pose ?? viewPose(model, view, mode, size.width / size.height)), zoom: Math.min(size.width, size.height) / extent };
-    if (camera instanceof THREE.OrthographicCamera) camera.zoom = goal.current.zoom;
-  }, [model, view, mode, camera, size.width, size.height, focusKey(focus)]); // eslint-disable-line react-hooks/exhaustive-deps
+    const pose = focusPose(model, focus) ?? viewPose(model, view, mode, size.width / size.height);
+    goal.current = { pos: pose.pos, target: pose.target, zoom: Math.min(size.width, size.height) / extent, until: performance.now() + 1500 };
+  }, [view, mode, fKey, plotKey, ready, camera]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the moment the user drags or zooms, they're in charge
+  useEffect(() => {
+    if (!controls) return;
+    const stop = () => { goal.current = null; };
+    controls.addEventListener("start", stop);
+    return () => controls.removeEventListener("start", stop);
+  }, [controls]);
 
   useFrame((_, dt) => {
     const g = goal.current;
     if (!g || !controls) return;
-    const k = 1 - Math.exp(-dt * 7);
+    const done = performance.now() > g.until;
+    const k = done ? 1 : 1 - Math.exp(-Math.min(dt, 0.1) * 7);
     camera.position.lerp(g.pos, k);
     controls.target.lerp(g.target, k);
     if (camera instanceof THREE.OrthographicCamera) {
@@ -484,7 +502,7 @@ function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: V
       camera.updateProjectionMatrix();
     }
     controls.update();
-    if (camera.position.distanceTo(g.pos) < 0.001) goal.current = null;
+    if (done || camera.position.distanceTo(g.pos) < 0.005) goal.current = null;
   });
   return null;
 }
@@ -525,7 +543,7 @@ function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, [focusKey(focus)]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [focusKey(focus), camera]); // eslint-disable-line react-hooks/exhaustive-deps -- camera: walking may switch from the 2D camera
 
   useFrame((_, dt) => {
     const k = keys.current;
@@ -551,6 +569,15 @@ function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
   });
 
   return <PointerLockControls />;
+}
+
+/** Development only: lets automated browser checks read the live camera (window.__view). */
+function DevHook() {
+  const { camera, controls, invalidate } = useThree();
+  useEffect(() => {
+    (window as unknown as { __view: unknown }).__view = { camera, controls, invalidate };
+  });
+  return null;
 }
 
 /** Render a small snapshot of every view once the scene has settled. */
