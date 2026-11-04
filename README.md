@@ -41,6 +41,18 @@ The result opens as a normal project; fix anything that's off in the editor. Bes
 dark pen, whole page in frame, sizes written for every room and the plot. Not yet read: windows (gaps
 come out as doorways), Hindi handwriting, curved or angled walls.
 
+## Exploring in 3D
+
+- The 3D view's top-right switch picks **Auto / Roof / Cutaway / Doll-house**.
+- **Go to** (bottom-left) jumps inside any room or outside at eye level; inside a room, drag to look around
+  (up to the ceiling, down to the floor) and scroll to zoom. Double-clicking a room's floor does the same.
+- **Walk**: click the view to look with the mouse, W A S D / arrows to walk, Shift to run, Esc frees the
+  mouse. Walls stop you; doorways let you through.
+- **Close-ups**: double-click a wall (or use *Zoom into wall* in its panel) to see its layers, bricks in
+  courses, conduit, pipes, lintel and DPC; click any part for its properties and choose another option.
+  Floors (from a room's panel), the roof (from the summary), doors and windows have close-ups too.
+  Options and typical values live in `web/src/lib/materials.ts` and are saved in the project's `specs`.
+
 ## Editing plans
 
 In the 2D plan, choose a tool from the toolbar (keyboard shortcut in brackets):

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, OrthographicCamera, PerspectiveCamera, RoundedBox } from "@react-three/drei";
+import { OrbitControls, OrthographicCamera, PerspectiveCamera, PointerLockControls, RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
-import type { BuildingModel, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
-import { bbox, footprint, pointOnWall, solidSpans, stairLayout, viewDirection, wallFrame } from "../lib/geometry";
+import type { BuildingModel, Focus, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
+import { bbox, centroid, footprint, pointOnWall, solidSpans, spanRect, stairLayout, viewDirection, wallFrame } from "../lib/geometry";
+import type { CloseUpTarget } from "./CloseUp";
 
 const M = 1 / 1000; // model mm → scene metres
 
@@ -21,7 +22,13 @@ interface Props {
   onSelectWall: (id: string | null) => void;
   onCanvas?: (canvas: HTMLCanvasElement) => void;
   onThumbnails?: (thumbs: Partial<Record<ViewName, string>>) => void;
+  focus?: Focus;
+  walking?: boolean;
+  onFocus?: (f: Focus) => void;
+  onCloseUp?: (t: CloseUpTarget) => void;
 }
+
+const EYE = 1600; // mm above the floor
 
 export default function Viewer3D(props: Props) {
   const { model, mode } = props;
@@ -34,10 +41,14 @@ export default function Viewer3D(props: Props) {
       onPointerMissed={() => props.onSelectWall(null)}
       style={{ background: "linear-gradient(#eef1f7, #f8f8fb)" }}
     >
-      <PerspectiveCamera makeDefault={mode === "3d"} fov={38} near={0.1} far={500} position={[30, 25, 30]} />
+      <PerspectiveCamera makeDefault={mode === "3d"} fov={props.walking || props.focus?.kind === "room" ? 70 : props.focus ? 55 : 38} near={0.05} far={500} position={[30, 25, 30]} />
       <OrthographicCamera makeDefault={mode === "2d"} near={-500} far={500} position={[30, 25, 30]} zoom={20} />
-      <OrbitControls key={mode} makeDefault enableDamping dampingFactor={0.12} />
-      <CameraRig model={model} view={props.view} mode={mode} />
+      {props.walking ? (
+        <Walker model={model} focus={props.focus ?? null} />
+      ) : (
+        <OrbitControls key={`${mode}-${focusKey(props.focus)}`} makeDefault enableDamping dampingFactor={0.12} {...orbitLimits(model, props.focus ?? null)} />
+      )}
+      {!props.walking && <CameraRig model={model} view={props.view} mode={mode} focus={props.focus ?? null} />}
       <Thumbnails model={model} onThumbnails={props.onThumbnails} />
 
       <hemisphereLight args={["#ffffff", "#c3ccb4", 1.1]} />
@@ -59,7 +70,7 @@ function useToScene(model: BuildingModel) {
   }, [model]);
 }
 
-function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
+function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking, onFocus, onCloseUp }: Props) {
   const S = useToScene(model);
   const floor = model.floors[0];
   const plot = bbox(model.plot.polygon);
@@ -69,8 +80,11 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
   const showGround = view !== "Bottom";
   const elevation = ["North", "South", "East", "West", "Bottom"].includes(view);
   const cut = layers.cut === "auto" ? (elevation ? "roof" : "open") : layers.cut;
-  const showRoof = cut === "roof" && view !== "Top";
-  const wallTop = cut === "doll" ? DOLL_HEIGHT : floor.height;
+  // inside a room (or walking) you want a ceiling over your head, unless the doll-house cut is chosen
+  const inside = walking || focus?.kind === "room";
+  const showRoof = (inside ? layers.cut !== "doll" : cut === "roof") && view !== "Top";
+  const wallTop = cut === "doll" || layers.cut === "doll" ? DOLL_HEIGHT : floor.height;
+  const focusRoom = focus?.kind === "room" ? floor.rooms.find((r) => r.id === focus.id) : undefined;
 
   return (
     <group>
@@ -100,7 +114,13 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
       {/* Plinth */}
       {fp.w > 0 && <Box at={S([fp.cx, fp.cy], base / 2)} size={[fp.w, base, fp.h]} color="#cfc9bd" />}
 
-      {floor.rooms.map((r) => <RoomFloor key={r.id} model={model} room={r} />)}
+      {floor.rooms.map((r) => (
+        <RoomFloor key={r.id} model={model} room={r}
+          onDoubleClick={() => onFocus?.({ kind: "room", id: r.id })} onShiftClick={() => onCloseUp?.({ kind: "floor", roomId: r.id })} />
+      ))}
+      {focusRoom && (
+        <pointLight position={S(centroid(focusRoom.polygon), base + floor.height - 300)} intensity={6} distance={12} decay={1.6} color="#fff4e0" />
+      )}
 
       {floor.rooms.filter((r) => r.type === "stair").flatMap((r) =>
         stairLayout(r, floor.height).map((t, i) => {
@@ -110,7 +130,8 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
       )}
 
       {floor.walls.map((w) => (
-        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id} onSelect={onSelectWall} />
+        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id} onSelect={onSelectWall}
+          onOpen={() => onCloseUp?.({ kind: "wall", id: w.id })} />
       ))}
       {floor.openings.map((o) => {
         const shown = wallTop < floor.height ? clipOpening(o, wallTop) : o;
@@ -137,7 +158,9 @@ function Site({ model, layers, view, selectedWall, onSelectWall }: Props) {
 }
 
 /** Room floor finish as an extruded polygon, so L-shaped rooms render correctly. */
-function RoomFloor({ model, room }: { model: BuildingModel; room: Room }) {
+function RoomFloor({ model, room, onDoubleClick, onShiftClick }: {
+  model: BuildingModel; room: Room; onDoubleClick?: () => void; onShiftClick?: () => void;
+}) {
   const p = bbox(model.plot.polygon);
   const geometry = useMemo(() => {
     const shape = new THREE.Shape(room.polygon.map(([x, y]) => new THREE.Vector2((x - p.cx) * M, (y - p.cy) * M)));
@@ -145,7 +168,8 @@ function RoomFloor({ model, room }: { model: BuildingModel; room: Room }) {
   }, [room.polygon, p.cx, p.cy]);
   useEffect(() => () => geometry.dispose(), [geometry]);
   return (
-    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, model.floors[0].plinth * M, 0]} receiveShadow>
+    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, model.floors[0].plinth * M, 0]} receiveShadow
+      onDoubleClick={(e) => { e.stopPropagation(); if (e.shiftKey) onShiftClick?.(); else onDoubleClick?.(); }}>
       <meshStandardMaterial color={FLOOR_COLORS[room.type] ?? "#e5e0d6"} roughness={0.85} />
     </mesh>
   );
@@ -153,10 +177,11 @@ function RoomFloor({ model, room }: { model: BuildingModel; room: Room }) {
 
 function Box({ at, size, color, rotY = 0, ...rest }: {
   at: THREE.Vector3; size: [number, number, number]; color: string; rotY?: number;
-  onClick?: (e: { stopPropagation: () => void }) => void; transparent?: boolean; opacity?: number;
+  onClick?: (e: { stopPropagation: () => void }) => void; onDoubleClick?: () => void; transparent?: boolean; opacity?: number;
 }) {
   return (
-    <mesh position={at} rotation-y={rotY} castShadow receiveShadow onClick={rest.onClick}>
+    <mesh position={at} rotation-y={rotY} castShadow receiveShadow onClick={rest.onClick}
+      onDoubleClick={rest.onDoubleClick && ((e) => { e.stopPropagation(); rest.onDoubleClick!(); })}>
       <boxGeometry args={[size[0] * M, size[1] * M, size[2] * M]} />
       <meshStandardMaterial color={color} transparent={rest.transparent} opacity={rest.opacity ?? 1} roughness={0.85} />
     </mesh>
@@ -170,8 +195,8 @@ function clipOpening(o: Opening, top: number): Opening {
   return { ...o, height: Math.max(0, Math.min(o.height, top - o.sill)) };
 }
 
-function WallMesh({ model, wall, top, selected, onSelect }: {
-  model: BuildingModel; wall: Wall; top: number; selected: boolean; onSelect: (id: string) => void;
+function WallMesh({ model, wall, top, selected, onSelect, onOpen }: {
+  model: BuildingModel; wall: Wall; top: number; selected: boolean; onSelect: (id: string) => void; onOpen?: () => void;
 }) {
   const S = useToScene(model);
   const floor = model.floors[0];
@@ -193,7 +218,7 @@ function WallMesh({ model, wall, top, selected, onSelect }: {
     <group>
       {visible.map(([s0, s1, z0, z1], i) => (
         <Box key={i} at={S(pointOnWall(wall, (s0 + s1) / 2), base + (z0 + z1) / 2)} size={[s1 - s0, z1 - z0, wall.thickness]}
-          rotY={rotY} color={color} onClick={click} />
+          rotY={rotY} color={color} onClick={click} onDoubleClick={onOpen} />
       ))}
     </group>
   );
@@ -396,7 +421,44 @@ function viewPose(model: BuildingModel, view: ViewName, mode: "2d" | "3d", aspec
   return { pos: horiz.add(new THREE.Vector3(0, D * Math.sin(elev), 0)).add(target), target };
 }
 
-function CameraRig({ model, view, mode }: { model: BuildingModel; view: ViewName; mode: "2d" | "3d" }) {
+function focusKey(f: Focus | undefined) {
+  return !f ? "house" : f.kind === "room" ? `room-${f.id}` : "outside";
+}
+
+/** Where the camera goes for a focus, and how far it may orbit/zoom without leaving the room. */
+function focusPose(model: BuildingModel, focus: Focus) {
+  const floor = model.floors[0];
+  const p = bbox(model.plot.polygon);
+  const S = (pt: Point, h: number) => new THREE.Vector3((pt[0] - p.cx) * M, h * M, -(pt[1] - p.cy) * M);
+  if (focus?.kind === "room") {
+    const room = floor.rooms.find((r) => r.id === focus.id);
+    if (room) {
+      const b = bbox(room.polygon);
+      const c = centroid(room.polygon);
+      const reach = Math.max(400, 0.42 * Math.min(b.w, b.h)); // stays inside the room while orbiting
+      const target = S(c, floor.plinth + 1300);
+      const pos = S([c[0] - reach * 0.7, c[1] - reach * 0.7], floor.plinth + EYE);
+      return { pos, target, maxDistance: reach * M * 1.05 };
+    }
+  }
+  if (focus?.kind === "outside") {
+    const target = S([p.cx, p.cy], 1500);
+    const pos = S([p.cx, p.y0 - 2500], EYE);
+    return { pos, target, maxDistance: Math.hypot(p.w, p.h) * M };
+  }
+  return null;
+}
+
+function orbitLimits(model: BuildingModel, focus: Focus) {
+  const pose = focusPose(model, focus);
+  if (!pose) return {};
+  // inside: look all the way up to the ceiling and down to the floor; outside: stay above ground
+  return focus?.kind === "room"
+    ? { minDistance: 0.05, maxDistance: pose.maxDistance, minPolarAngle: 0.05, maxPolarAngle: Math.PI - 0.05, enablePan: false }
+    : { minDistance: 2, maxDistance: pose.maxDistance, maxPolarAngle: Math.PI / 2 - 0.02 };
+}
+
+function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: ViewName; mode: "2d" | "3d"; focus: Focus }) {
   const { camera, controls, size } = useThree() as unknown as {
     camera: THREE.PerspectiveCamera | THREE.OrthographicCamera; controls: { target: THREE.Vector3; update: () => void } | null;
     size: { width: number; height: number };
@@ -406,9 +468,10 @@ function CameraRig({ model, view, mode }: { model: BuildingModel; view: ViewName
   useEffect(() => {
     const p = bbox(model.plot.polygon);
     const extent = Math.max(p.w, p.h) * M * 1.1;
-    goal.current = { ...viewPose(model, view, mode, size.width / size.height), zoom: Math.min(size.width, size.height) / extent };
+    const pose = focusPose(model, focus);
+    goal.current = { ...(pose ?? viewPose(model, view, mode, size.width / size.height)), zoom: Math.min(size.width, size.height) / extent };
     if (camera instanceof THREE.OrthographicCamera) camera.zoom = goal.current.zoom;
-  }, [model, view, mode, camera, size.width, size.height]);
+  }, [model, view, mode, camera, size.width, size.height, focusKey(focus)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useFrame((_, dt) => {
     const g = goal.current;
@@ -424,6 +487,70 @@ function CameraRig({ model, view, mode }: { model: BuildingModel; view: ViewName
     if (camera.position.distanceTo(g.pos) < 0.001) goal.current = null;
   });
   return null;
+}
+
+/** First-person walking: mouse to look (after a click), W A S D or arrows to move, Shift to run.
+ * Walls block you; doorways and openings let you through. */
+function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
+  const { camera } = useThree();
+  const keys = useRef<Set<string>>(new Set());
+  const floor = model.floors[0];
+  const p = bbox(model.plot.polygon);
+
+  // obstacles in plan mm: wall solid spans (with their door/window gaps), plus a body radius
+  const obstacles = useMemo(() => {
+    const R = 220;
+    const rects = floor.walls.flatMap((w) => solidSpans(w, floor.openings.filter((o) => o.kind === "door" || o.kind === "opening"))
+      .map(([s0, s1]) => spanRect(w, s0, s1, -w.thickness / 2 - R, w.thickness / 2 + R)));
+    return rects.map((r) => bbox(r));
+  }, [floor]);
+  const blocked = (x: number, y: number) =>
+    x < p.x0 + 200 || x > p.x1 - 200 || y < p.y0 - 6000 || y > p.y1 - 200 || obstacles.some((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1);
+
+  useEffect(() => {
+    const room = focus?.kind === "room" ? floor.rooms.find((r) => r.id === focus.id) : undefined;
+    // outside: stand 1.5 m in front of the main door (the exterior door nearest the road), facing it
+    const walls = new Map(floor.walls.map((w) => [w.id, w]));
+    const mainDoor = floor.openings
+      .filter((o) => o.kind === "door" && walls.get(o.wall)?.type === "exterior")
+      .map((o) => pointOnWall(walls.get(o.wall)!, o.offset + o.width / 2))
+      .sort((a, b) => a[1] - b[1])[0];
+    const start: Point = room ? centroid(room.polygon) : mainDoor ? [mainDoor[0], mainDoor[1] - 1500] : [p.cx, p.y0 + 1200];
+    const look: Point = room ? [p.cx, p.cy] : mainDoor ?? [p.cx, p.cy];
+    const eye = (room ? floor.plinth : 0) + EYE;
+    camera.position.set((start[0] - p.cx) * M, eye * M, -(start[1] - p.cy) * M);
+    camera.lookAt((look[0] - p.cx) * M, eye * M, -(look[1] - p.cy) * M);
+    const down = (e: KeyboardEvent) => keys.current.add(e.code);
+    const up = (e: KeyboardEvent) => keys.current.delete(e.code);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+  }, [focusKey(focus)]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useFrame((_, dt) => {
+    const k = keys.current;
+    const fwd = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
+    const side = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
+    if (!fwd && !side) return;
+    const dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0;
+    dir.normalize();
+    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0));
+    const speed = (k.has("ShiftLeft") || k.has("ShiftRight") ? 3 : 1.4) * Math.min(dt, 0.05);
+    const move = dir.multiplyScalar(fwd * speed).add(right.multiplyScalar(side * speed));
+    // plan coordinates of where we are and where we'd go; slide along walls axis by axis
+    const x = camera.position.x / M + p.cx, y = -camera.position.z / M + p.cy;
+    const nx = x + move.x / M, ny = y - move.z / M;
+    if (!blocked(nx, y)) camera.position.x += move.x;
+    if (!blocked(camera.position.x / M + p.cx, ny)) camera.position.z += move.z;
+    // step up onto the plinth when inside the house
+    const fp = footprint(model);
+    const onPlinth = x > fp.x0 && x < fp.x1 && y > fp.y0 && y < fp.y1;
+    camera.position.y += (((onPlinth ? floor.plinth : 0) + EYE) * M - camera.position.y) * 0.2;
+  });
+
+  return <PointerLockControls />;
 }
 
 /** Render a small snapshot of every view once the scene has settled. */

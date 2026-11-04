@@ -93,6 +93,9 @@ export type Tool = "select" | "wall" | "door" | "window";
 export type ViewName = "North" | "South" | "East" | "West" | "NE" | "NW" | "SE" | "SW" | "Top" | "Bottom";
 export const VIEWS: ViewName[] = ["North", "South", "East", "West", "NE", "NW", "SE", "SW", "Top", "Bottom"];
 
+/** Where the 3D camera is: the whole house (null), inside one room, or outside at eye level. */
+export type Focus = { kind: "room"; id: string } | { kind: "outside" } | null;
+
 /** How much of the house the 3D view shows: auto picks roof for straight-on elevations, open otherwise. */
 export type Cut = "auto" | "roof" | "open" | "doll";
 

@@ -262,6 +262,7 @@ export function RightPanel(props: {
   onSelect: (s: Selection) => void;
   onEdit: Edit;
   onCloseUp: (t: CloseUpTarget) => void;
+  onFocusRoom: (id: string) => void;
   footer: ReactNode;
 }) {
   const { model, selection, onEdit } = props;
@@ -364,6 +365,7 @@ export function RightPanel(props: {
                   {Object.entries(FURNITURE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                 </select>
               </Field>
+              <ZoomButton label="Look inside this room in 3D" onClick={() => props.onFocusRoom(room.id)} />
               <ZoomButton label="Floor build-up close-up" onClick={() => props.onCloseUp({ kind: "floor", roomId: room.id })} />
               <p className="text-xs text-slate-500">Rooms come from closed loops of walls; move the walls to resize the room.</p>
             </div>
