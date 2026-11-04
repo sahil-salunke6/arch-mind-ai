@@ -462,7 +462,7 @@ function Summary({ model, onEdit }: { model: BuildingModel; onEdit: Edit }) {
         <Row icon={<Car size={17} />} label="Parking">
           {s.parking.length}{s.parking[0] && <span className="text-xs text-slate-500"> ({roomSize(s.parking[0])})</span>}
         </Row>
-        <Row icon={<Building2 size={17} />} label="Built-up Area">≈ {Math.round(s.builtUp).toLocaleString()} sq ft</Row>
+        <Row icon={<Building2 size={17} />} label="Built-up Area">≈ {Math.round(s.builtUp).toLocaleString()} sq ft{s.floors > 1 ? ` · ${s.floors} floors` : ""}</Row>
       </dl>
 
       <h3 className="mt-5 mb-2 text-sm font-semibold">Plot & Site</h3>

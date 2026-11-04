@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DoorOpen, Hand, Maximize, MousePointer2, PenLine, Redo2, Square, Undo2 } from "lucide-react";
-import type { BuildingModel, Furniture, Layers, Opening, Point, Selection, Tool, Wall } from "../types";
+import type { BuildingModel, Floor, Furniture, Layers, Opening, Point, Selection, Tool, Wall } from "../types";
 import {
   bbox, centroid, ftIn, pointOnWall, projectOnWall, ROOM_COLORS, roomSize, solidSpans, spanRect, stairLayout, wallLength,
 } from "../lib/geometry";
@@ -18,6 +18,8 @@ const pts = (list: Point[]) => list.map((p) => P(p).join(",")).join(" ");
 interface Props {
   model: BuildingModel;
   layers: Layers;
+  /** Upstairs: the floor below, drawn faintly so walls can be lined up over it. */
+  below?: Floor;
   selection: Selection;
   onSelect: (s: Selection) => void;
   editable?: boolean;
@@ -295,6 +297,15 @@ export default function PlanView2D(props: Props) {
             <rect key={`${r.id}-${i}`} x={t.rect[0]} y={-t.rect[3]} width={t.rect[2] - t.rect[0]} height={t.rect[3] - t.rect[1]}
               fill={t.flight === -1 ? "#e2e2e8" : "#f4f4f7"} stroke="#9a9aa8" strokeWidth={18} pointerEvents="none" />
           )),
+        )}
+
+        {/* The floor below, as a guide */}
+        {props.below && (
+          <g pointerEvents="none" opacity={0.35}>
+            {props.below.walls.map((w) => (
+              <polygon key={w.id} points={pts(spanRect(w, 0, wallLength(w)))} fill="none" stroke="#6b6a78" strokeWidth={4 * px} strokeDasharray={`${14 * px} ${10 * px}`} />
+            ))}
+          </g>
         )}
 
         {layers.furniture && floor.furniture.map((f) => (

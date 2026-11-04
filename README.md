@@ -46,12 +46,24 @@ come out as doorways), Hindi handwriting, curved or angled walls.
 - The 3D view's top-right switch picks **Auto / Roof / Cutaway / Doll-house**.
 - **Go to** (bottom-left) jumps inside any room or outside at eye level; inside a room, drag to look around
   (up to the ceiling, down to the floor) and scroll to zoom. Double-clicking a room's floor does the same.
-- **Walk**: click the view to look with the mouse, W A S D / arrows to walk, Shift to run, Esc frees the
-  mouse. Walls stop you; doorways let you through.
+- **Walk**: drag the view to look around, W/↑ forward, S/↓ back, ←/→ turn, A/D step sideways, Shift to run
+  (or hold the on-screen arrows). Walls stop you; doorways let you through, and you can walk up the stairs.
 - **Close-ups**: double-click a wall (or use *Zoom into wall* in its panel) to see its layers, bricks in
   courses, conduit, pipes, lintel and DPC; click any part for its properties and choose another option.
   Floors (from a room's panel), the roof (from the summary), doors and windows have close-ups too.
   Options and typical values live in `web/src/lib/materials.ts` and are saved in the project's `specs`.
+
+## Upper floors
+
+- **+ Floor** (next to Compare / 2D Plan / 3D Model) adds a storey on top. The outer walls, their windows
+  and the staircase walls carry up; the front door doesn't. Draw the inner rooms as on the ground floor;
+  the floor below shows as faint dashed lines to line walls up with.
+- The floor tabs pick which floor the 2D plan, the right panel and the close-ups work on. The Cutaway and
+  Doll-house views show the chosen floor and the ones below; Roof and the straight elevations show the
+  whole building. The bin icon deletes the chosen upper floor (undo brings it back).
+- Each floor is `floor-to-floor height + slab` above the one below (`web/src/lib/floors.ts`,
+  `api/app/export_pdf.py`). The PDF has a plan sheet per floor and stacks all storeys in the elevations and
+  section; the DXF draws each floor plan beside the one below.
 
 ## Editing plans
 

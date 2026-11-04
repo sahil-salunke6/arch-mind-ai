@@ -166,3 +166,32 @@ def test_opening_styles_in_schedule_and_pdf():
     assert {"Double door", "Single door", "Casement window", "Louvered ventilator"} <= names
     text = PdfReader(io.BytesIO(export_pdf(model))).pages[0].extract_text()
     assert "Double door" in text
+
+
+def _two_storey():
+    model = sample_project()
+    ground = model.floors[0]
+    stair = next(r for r in ground.rooms if r.type == "stair")
+    keep = [w for w in ground.walls if w.type == "exterior"]
+    ids = {w.id for w in keep}
+    upper = ground.model_copy(update={
+        "level": 1, "walls": keep, "furniture": [],
+        "openings": [o for o in ground.openings if o.wall in ids and o.kind in ("window", "ventilator")],
+        "rooms": [stair.model_copy(update={"id": "R-up-stair"})],
+    })
+    return model.model_copy(update={"floors": [ground, upper]})
+
+
+def test_two_storey_exports(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "store", ProjectStore(tmp_path / "p.db"))
+    client = TestClient(main.app)
+    pid = client.post("/api/projects", json=_two_storey().model_dump()).json()["id"]
+    saved = client.get(f"/api/projects/{pid}").json()
+    assert len(saved["floors"]) == 2 and saved["floors"][1]["rooms"]  # rooms detected upstairs too
+    pdf = PdfReader(io.BytesIO(client.get(f"/api/projects/{pid}/export.pdf").content))
+    assert len(pdf.pages) == 3  # ground plan, first floor plan, elevations
+    assert "FIRST FLOOR PLAN" in pdf.pages[1].extract_text()
+    assert "First Floor level" in pdf.pages[2].extract_text()
+    doc = ezdxf.read(io.StringIO(client.get(f"/api/projects/{pid}/export.dxf").content.decode()))
+    texts = [t.dxf.text for t in doc.modelspace().query("TEXT")]
+    assert "GROUND FLOOR PLAN" in texts and "FIRST FLOOR PLAN" in texts

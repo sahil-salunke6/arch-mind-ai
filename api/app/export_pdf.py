@@ -1,4 +1,4 @@
-"""A3 concept drawing set at 1:100: plan sheet, then elevations + section sheet."""
+"""A3 concept drawing set at 1:100: one plan sheet per floor, then elevations + section sheet."""
 
 import io
 from datetime import date
@@ -54,13 +54,31 @@ def export_pdf(model: BuildingModel) -> bytes:
     c = Canvas(buf, pagesize=(PAGE_W, PAGE_H))
     c.setTitle(f"{model.name} - Concept Drawings")
     c.setAuthor("ArchMind AI")
-    codes, schedule = opening_schedule(model.floors[0])
-    _plan_sheet(c, model, codes, schedule)
-    c.showPage()
+    for i, floor in enumerate(model.floors):
+        codes, schedule = opening_schedule(floor)
+        _plan_sheet(c, model, i, codes, schedule)
+        c.showPage()
     _elevation_sheet(c, model)
     c.showPage()
     c.save()
     return buf.getvalue()
+
+
+FLOOR_NAMES = ["Ground Floor", "First Floor", "Second Floor", "Third Floor", "Fourth Floor"]
+
+
+def floor_name(i: int) -> str:
+    return FLOOR_NAMES[i] if i < len(FLOOR_NAMES) else f"Floor {i}"
+
+
+def floor_base(model: BuildingModel, i: int) -> float:
+    """Finished level of floor i above ground: plinth, then each storey below plus its slab."""
+    return model.floors[0].plinth + sum(f.height + f.slab for f in model.floors[:i])
+
+
+def roof_top(model: BuildingModel) -> float:
+    top = model.floors[-1]
+    return floor_base(model, len(model.floors) - 1) + top.height + top.slab
 
 
 # ---------------------------------------------------------------- helpers
@@ -276,9 +294,10 @@ def section_line_y(floor: Floor) -> float:
 
 # ---------------------------------------------------------------- sheet 1: plan
 
-def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule: list[dict]):
+def _plan_sheet(c: Canvas, model: BuildingModel, index: int, codes: dict[str, str], schedule: list[dict]):
     _frame(c)
-    floor = model.floors[0]
+    floor = model.floors[index]
+    name = floor_name(index)
     px0, py0, px1, py1 = bbox(model.plot.polygon)
     sb = model.plot.setbacks
     pad_l, pad_r, pad_b, pad_t = 4200, 2600, 4600, 4400
@@ -405,7 +424,7 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
         c.setFillColorRGB(1, 1, 1)
 
     _north_arrow(c, v.p(px1 + 1500, py1 + 2600), model.north_deg)
-    _caption(c, MARGIN + area_w / 2, MARGIN + 9 * mm, "GROUND FLOOR PLAN")
+    _caption(c, MARGIN + area_w / 2, MARGIN + 9 * mm, f"{name.upper()} PLAN")
 
     # right column
     x = PAGE_W - MARGIN - COLUMN
@@ -413,10 +432,13 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
     plot_area = Polygon(model.plot.polygon).area
     built = (fx1 - fx0) * (fy1 - fy0)
     carpet = sum(r.area for r in floor.rooms)
+    total = sum((b[2] - b[0]) * (b[3] - b[1]) for b in (footprint(f) for f in model.floors))
     y = _table(c, x, y, [58 * mm, 40 * mm], ["Item", "Area"], [
         ["Plot area", f"{sqft(plot_area):,.0f} sq ft ({plot_area / 1e6:.1f} m²)"],
-        ["Built-up area (ground floor)", f"{sqft(built):,.0f} sq ft"],
-        ["Ground coverage", f"{built / plot_area * 100:.1f} %"],
+        [f"Built-up area ({name.lower()})", f"{sqft(built):,.0f} sq ft"],
+        *([["Total built-up (all floors)", f"{sqft(total):,.0f} sq ft"], ["FAR (floor area ratio)", f"{total / plot_area:.2f}"]]
+          if len(model.floors) > 1 else []),
+        ["Ground coverage", f"{_coverage(model) / plot_area * 100:.1f} %"],
         ["Carpet area (rooms)", f"{sqft(carpet):,.0f} sq ft"],
         ["Setbacks F / R / L / R", " / ".join(fi(s) for s in (sb.front, sb.rear, sb.left, sb.right))],
     ], "AREA STATEMENT")
@@ -433,7 +455,7 @@ def _plan_sheet(c: Canvas, model: BuildingModel, codes: dict[str, str], schedule
         f"Floor-to-floor height {fi(floor.height)}; plinth {fi(floor.plinth)} above ground.",
         "Room sizes are centre-line dimensions.",
     ])
-    _title_block(c, model, "Ground Floor Plan", "A-101")
+    _title_block(c, model, f"{name} Plan", f"A-{101 + index}")
 
 
 def _door_leaf(c: Canvas, v: View, w, s0: float, width: float, along: int, side: int, h: float):
@@ -488,10 +510,14 @@ def _north_arrow(c: Canvas, at: tuple[float, float], north_deg: float):
 
 # ---------------------------------------------------------------- sheet 2: elevations + section
 
+def _coverage(model: BuildingModel) -> float:
+    x0, y0, x1, y1 = footprint(model.floors[0])
+    return (x1 - x0) * (y1 - y0)
+
+
 def _elevation_items(model: BuildingModel):
-    floor = model.floors[0]
-    fx0, fy0, fx1, fy1 = footprint(floor)
-    corners = [(fx0, fy0), (fx1, fy0), (fx1, fy1), (fx0, fy1)]
+    ground = model.floors[0]
+    fx0, fy0, fx1, fy1 = footprint(ground)
     center = ((fx0 + fx1) / 2, (fy0 + fy1) / 2)
     items = []
     road = model.plot.road_sides
@@ -499,25 +525,33 @@ def _elevation_items(model: BuildingModel):
         dx, dy = compass(model, side)  # from building towards the viewer
         rx, ry = -dy, dx  # viewer faces (-dx, -dy); screen-right is that direction turned clockwise
         proj = lambda p: (p[0] - center[0]) * rx + (p[1] - center[1]) * ry  # noqa: E731
-        us = [proj(p) for p in corners]
-        openings = []
-        for w in (w for w in floor.walls if w.type == "exterior"):
-            nx, ny = outward_normal(w, center)
-            if nx * dx + ny * dy < 0.7:
+        storeys = []
+        for i, floor in enumerate(model.floors):
+            x0, y0, x1, y1 = footprint(floor)
+            if x1 - x0 <= 0:
                 continue
-            for o in (o for o in floor.openings if o.wall == w.id):
-                a, b = proj(point_on_wall(w, o.offset)), proj(point_on_wall(w, o.offset + o.width))
-                openings.append((min(a, b), max(a, b), o))
+            us = [proj(p) for p in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+            openings = []
+            for w in (w for w in floor.walls if w.type == "exterior"):
+                nx, ny = outward_normal(w, center)
+                if nx * dx + ny * dy < 0.7:
+                    continue
+                for o in (o for o in floor.openings if o.wall == w.id):
+                    a, b = proj(point_on_wall(w, o.offset)), proj(point_on_wall(w, o.offset + o.width))
+                    openings.append((min(a, b), max(a, b), o))
+            storeys.append({"floor": floor, "base": floor_base(model, i), "u0": min(us), "u1": max(us), "openings": openings})
+        if not storeys:
+            continue
         title = f"{side.upper()} ELEVATION" + (" (FRONT)" if side in road else "")
-        items.append({"title": title, "u0": min(us), "u1": max(us), "openings": openings, "kind": "elev"})
+        items.append({"title": title, "u0": min(st["u0"] for st in storeys), "u1": max(st["u1"] for st in storeys),
+                      "storeys": storeys, "kind": "elev"})
     return items
 
 
 def _elevation_sheet(c: Canvas, model: BuildingModel):
     _frame(c)
-    floor = model.floors[0]
-    total_h = floor.plinth + floor.height + floor.slab + model.roof.parapet
-    fx0, _, fx1, _ = footprint(floor)
+    total_h = roof_top(model) + model.roof.parapet
+    fx0, _, fx1, _ = footprint(model.floors[0])
     items = _elevation_items(model)
     items.append({"title": "SECTION A-A", "u0": fx0, "u1": fx1, "kind": "section"})
 
@@ -547,12 +581,8 @@ def _elevation_sheet(c: Canvas, model: BuildingModel):
             x += w + gap
 
     y = MARGIN + 58 * mm
-    levels = [
-        ("Ground level (GL)", 0), ("Plinth / floor level", floor.plinth),
-        ("Roof slab top", floor.plinth + floor.height + floor.slab), ("Parapet top", total_h),
-    ]
     _table(c, MARGIN + 5 * mm, y, [55 * mm, 38 * mm], ["Level", "Height above GL"],
-           [[n, f"+{fi(h)} ({h / 1000:.2f} m)"] for n, h in levels], "LEVELS")
+           [[n, f"+{fi(h)} ({h / 1000:.2f} m)"] for n, h in _levels(model)], "LEVELS")
     _notes(c, MARGIN + 110 * mm, y, [
         "External finish: cement plaster with exterior emulsion paint.",
         "Windows: aluminium/uPVC sliding with RCC chajja above.",
@@ -563,8 +593,16 @@ def _elevation_sheet(c: Canvas, model: BuildingModel):
     _title_block(c, model, "Elevations & Section", "A-201")
 
 
+def _levels(model: BuildingModel) -> list[tuple[str, float]]:
+    out = [("Ground level (GL)", 0.0)]
+    for i in range(len(model.floors)):
+        out.append((f"{floor_name(i)} level" if i else "Plinth / ground floor level", floor_base(model, i)))
+    out.append(("Roof slab top", roof_top(model)))
+    out.append(("Parapet top", roof_top(model) + model.roof.parapet))
+    return out
+
+
 def _levels_and_ground(v: View, model: BuildingModel, u0: float, u1: float):
-    floor = model.floors[0]
     c = v.c
     _style(c, 1.4)
     v.line((u0 - 1200, 0), (u1 + 1200, 0))
@@ -572,9 +610,8 @@ def _levels_and_ground(v: View, model: BuildingModel, u0: float, u1: float):
     for i in range(int((u1 - u0 + 2400) / 400)):
         x = u0 - 1200 + i * 400
         v.line((x, 0), (x - 250, -250))
-    total = floor.plinth + floor.height + floor.slab + model.roof.parapet
     c.setFillColorRGB(*GREY)
-    for h in (0, floor.plinth, floor.plinth + floor.height + floor.slab, total):
+    for _, h in _levels(model):
         _style(c, 0.3, stroke=GREY, dash=([1.5, 1.5], 0))
         v.line((u1 + 200, h), (u1 + 1300, h))
         c.setFillColorRGB(*GREY)
@@ -583,21 +620,26 @@ def _levels_and_ground(v: View, model: BuildingModel, u0: float, u1: float):
 
 def _draw_elevation(v: View, model: BuildingModel, it: dict):
     c = v.c
-    floor = model.floors[0]
-    u0, u1 = it["u0"], it["u1"]
-    pl, H, slab, par = floor.plinth, floor.height, floor.slab, model.roof.parapet
-    _levels_and_ground(v, model, u0, u1)
-    # plinth, wall, slab band, parapet
+    pl, par = model.floors[0].plinth, model.roof.parapet
+    _levels_and_ground(v, model, it["u0"], it["u1"])
+    g = it["storeys"][0]
     _style(c, 0.6, fill=(0.82, 0.80, 0.76))
-    v.rect(u0, 0, u1, pl, fill=1)
-    _style(c, 0.8, fill=(0.97, 0.96, 0.93))
-    v.rect(u0, pl, u1, pl + H, fill=1)
-    _style(c, 0.6, fill=(0.88, 0.87, 0.84))
-    v.rect(u0 - 150, pl + H, u1 + 150, pl + H + slab, fill=1)
-    _style(c, 0.6, fill=(0.95, 0.94, 0.91))
-    v.rect(u0 - 75, pl + H + slab, u1 + 75, pl + H + slab + par, fill=1)
-    for a, b, o in it["openings"]:
-        _draw_opening_elev(v, a, b, o, pl)
+    v.rect(g["u0"], 0, g["u1"], pl, fill=1)  # plinth
+    last = len(it["storeys"]) - 1
+    for k, st in enumerate(it["storeys"]):
+        floor, b, u0, u1 = st["floor"], st["base"], st["u0"], st["u1"]
+        H, slab = floor.height, floor.slab
+        _style(c, 0.8, fill=(0.97, 0.96, 0.93))
+        v.rect(u0, b, u1, b + H, fill=1)
+        _style(c, 0.6, fill=(0.88, 0.87, 0.84))
+        v.rect(u0 - 150, b + H, u1 + 150, b + H + slab, fill=1)
+        # parapet on the roof, and on any terrace left where the floor above is smaller
+        above = it["storeys"][k + 1] if k < last else None
+        if above is None or above["u0"] > u0 + 1 or above["u1"] < u1 - 1:
+            _style(c, 0.6, fill=(0.95, 0.94, 0.91))
+            v.rect(u0 - 75, b + H + slab, u1 + 75, b + H + slab + par, fill=1)
+        for a, bb, o in st["openings"]:
+            _draw_opening_elev(v, a, bb, o, b)
 
 
 def _draw_opening_elev(v: View, a: float, b: float, o: Opening, pl: float):
@@ -642,47 +684,62 @@ def _draw_opening_elev(v: View, a: float, b: float, o: Opening, pl: float):
 def _draw_section(v: View, model: BuildingModel):
     """Section along y = A-A, looking away from the road (screen-right = +x)."""
     c = v.c
-    floor = model.floors[0]
-    pl, H, slab, par = floor.plinth, floor.height, floor.slab, model.roof.parapet
-    fx0, _, fx1, _ = footprint(floor)
-    ys = section_line_y(floor)
+    ground = model.floors[0]
+    pl, par = ground.plinth, model.roof.parapet
+    fx0, _, fx1, _ = footprint(ground)
+    ys = section_line_y(ground)
     _levels_and_ground(v, model, fx0, fx1)
 
     _style(c, 0.5, fill=(0.85, 0.84, 0.80))
     v.rect(fx0, 0, fx1, pl, fill=1)  # plinth fill
-    # stair profile
-    for room in (r for r in floor.rooms if r.type == "stair"):
-        for (x0, y0, x1, y1), top, _ in stair_layout(room, H):
-            if y0 <= ys <= y1:
-                _style(c, 0.35, fill=(0.78, 0.77, 0.74))
-                v.rect(x0, pl, x1, pl + top, fill=1)
-    # room names
-    c.setFillColorRGB(*GREY)
-    for room in floor.rooms:
-        x0, y0, x1, y1 = bbox(room.polygon)
-        if y0 <= ys <= y1:
-            v.text((x0 + x1) / 2, pl + H * 0.72, room.name.upper(), 5.5, "Helvetica-Bold")
-    # cut walls (perpendicular to the section line)
     cut = (0.12, 0.11, 0.16)
-    for w in floor.walls:
-        (ux, uy), _ = wall_frame(w)
-        if abs(uy) < 0.5 or not (min(w.a[1], w.b[1]) <= ys <= max(w.a[1], w.b[1])):
+    last = len(model.floors) - 1
+    for i, floor in enumerate(model.floors):
+        b, H, slab = floor_base(model, i), floor.height, floor.slab
+        x0f, _, x1f, _ = footprint(floor)
+        if x1f - x0f <= 0:
             continue
-        s = (ys - w.a[1]) / uy
-        x = w.a[0] + ux * s
-        t = w.thickness / 2
-        hit = next((o for o in floor.openings if o.wall == w.id and o.offset <= s <= o.offset + o.width), None)
+        # stair profile
+        for room in (r for r in floor.rooms if r.type == "stair"):
+            for (x0, y0, x1, y1), top, _ in stair_layout(room, H + slab):
+                if y0 <= ys <= y1:
+                    _style(c, 0.35, fill=(0.78, 0.77, 0.74))
+                    v.rect(x0, b, x1, b + top, fill=1)
+        # room names
+        c.setFillColorRGB(*GREY)
+        for room in floor.rooms:
+            x0, y0, x1, y1 = bbox(room.polygon)
+            if y0 <= ys <= y1:
+                v.text((x0 + x1) / 2, b + H * 0.72, room.name.upper(), 5.5, "Helvetica-Bold")
+        # cut walls (perpendicular to the section line)
+        for w in floor.walls:
+            (ux, uy), _ = wall_frame(w)
+            if abs(uy) < 0.5 or not (min(w.a[1], w.b[1]) <= ys <= max(w.a[1], w.b[1])):
+                continue
+            s_ = (ys - w.a[1]) / uy
+            x = w.a[0] + ux * s_
+            t = w.thickness / 2
+            hit = next((o for o in floor.openings if o.wall == w.id and o.offset <= s_ <= o.offset + o.width), None)
+            _style(c, 0.4, fill=cut)
+            if hit is None:
+                v.rect(x - t, b, x + t, b + H, fill=1)
+            else:
+                if hit.sill > 0:
+                    v.rect(x - t, b, x + t, b + hit.sill, fill=1)
+                v.rect(x - t, b + hit.sill + hit.height, x + t, b + H, fill=1)
+        # slab over this storey (the next floor, or the roof) with the stairwell left open
         _style(c, 0.4, fill=cut)
-        if hit is None:
-            v.rect(x - t, pl, x + t, pl + H, fill=1)
-        else:
-            if hit.sill > 0:
-                v.rect(x - t, pl, x + t, pl + hit.sill, fill=1)
-            v.rect(x - t, pl + hit.sill + hit.height, x + t, pl + H, fill=1)
-    # roof slab + parapets
-    _style(c, 0.4, fill=cut)
-    v.rect(fx0 - 150, pl + H, fx1 + 150, pl + H + slab, fill=1)
-    v.rect(fx0 - 75, pl + H + slab, fx0 + 40, pl + H + slab + par, fill=1)
-    v.rect(fx1 - 40, pl + H + slab, fx1 + 75, pl + H + slab + par, fill=1)
-    # floor-to-ceiling dimension
-    _dim_chain(v, [pl, pl + H], fx0 - 700, False)
+        over = 150 if i == last else 0
+        spans = [(x0f - over, x1f + over)]
+        if i < last:
+            for room in (r for r in floor.rooms if r.type == "stair"):
+                sx0, sy0, sx1, sy1 = bbox(room.polygon)
+                if sy0 <= ys <= sy1:
+                    spans = [piece for a, bb in spans for piece in ((a, min(bb, sx0)), (max(a, sx1), bb)) if piece[1] > piece[0]]
+        for a, bb in spans:
+            v.rect(a, b + H, bb, b + H + slab, fill=1)
+        if i == last:
+            v.rect(x0f - 75, b + H + slab, x0f + 40, b + H + slab + par, fill=1)
+            v.rect(x1f - 40, b + H + slab, x1f + 75, b + H + slab + par, fill=1)
+        # floor-to-ceiling dimension
+        _dim_chain(v, [b, b + H], fx0 - 700, False)

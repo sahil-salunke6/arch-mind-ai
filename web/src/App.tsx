@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Box as BoxIcon, Maximize2, SquareDashed } from "lucide-react";
+import { Box as BoxIcon, Maximize2, Plus, SquareDashed, Trash2 } from "lucide-react";
 import { api, type ProjectInfo, type SketchReport } from "./lib/api";
 import { VIEWS, type BuildingModel, type Focus, type Layers, type Selection, type Tool, type ViewName } from "./types";
 import { DownloadMenu, Stepper, TopNav, type SaveStatus } from "./components/Chrome";
 import { blankProject, deleteFurniture, deleteOpening, deleteWall, rotateFurniture } from "./lib/edit";
 import { useHistory } from "./lib/history";
+import { activeFirst, addFloor, findRoom, floorName, removeFloor, restoreOrder } from "./lib/floors";
 import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
 import SketchView from "./components/SketchView";
@@ -39,7 +40,14 @@ export default function App() {
   const [closeUp, setCloseUp] = useState<CloseUpTarget | null>(null);
   const [focus, setFocus] = useState<Focus>(null);
   const [walking, setWalking] = useState(false);
-  const goTo = (f: Focus) => { setFocus(f); setWalking(false); setLayout("3D Model"); };
+  const [floorIx, setFloorIx] = useState(0);
+  const fi = model ? Math.min(floorIx, model.floors.length - 1) : 0;
+  // the editor, panels and close-ups work on the chosen floor (see lib/floors activeFirst)
+  const plan = useMemo(() => (model ? activeFirst(model, fi) : null), [model, fi]);
+  const goTo = (f: Focus) => {
+    if (f?.kind === "room" && model) { const found = findRoom(model, f.id); if (found) setFloorIx(found.floor); }
+    setFocus(f); setWalking(false); setLayout("3D Model");
+  };
   const openCloseUp = (t: CloseUpTarget) => { setCloseUp(t); setLayout("3D Model"); };
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [thumbs, setThumbs] = useState<Partial<Record<ViewName, string>>>({});
@@ -51,6 +59,7 @@ export default function App() {
       setStatus("saved");
       setProjectId(id);
       setSelection(null);
+      setFloorIx(0);
       setThumbs({});
     } catch (e) {
       setError(`Could not load the project (${e}). Is the API running on port 8000?`);
@@ -74,6 +83,9 @@ export default function App() {
     setStatus("unsaved");
   }, [history.commit, history.replace]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  /** Edits made on the chosen floor's view of the model. */
+  const editPlan = useCallback((next: BuildingModel, commit = true) => edit(restoreOrder(next, fi), commit), [edit, fi]);
+
   const undo = () => { history.undo(); dirty.current = true; setStatus("unsaved"); };
   const redo = () => { history.redo(); dirty.current = true; setStatus("unsaved"); };
 
@@ -87,12 +99,13 @@ export default function App() {
       saving.current = true;
       dirty.current = false;
       setStatus("saving");
-      const sentWalls = JSON.stringify(model.floors[0].walls);
+      const wallsOf = (m: BuildingModel) => JSON.stringify(m.floors.map((f) => f.walls));
+      const sentWalls = wallsOf(model);
       try {
         const saved = await api.save(projectId, model);
         const now = latest.current;
-        if (now && JSON.stringify(now.floors[0].walls) === sentWalls) {
-          history.replace({ ...now, floors: [{ ...now.floors[0], rooms: saved.floors[0].rooms }, ...now.floors.slice(1)] });
+        if (now && wallsOf(now) === sentWalls && saved.floors.length === now.floors.length) {
+          history.replace({ ...now, floors: now.floors.map((f, i) => ({ ...f, rooms: saved.floors[i].rooms })) });
         }
         if (!dirty.current) setStatus("saved");
         refreshList();
@@ -109,11 +122,11 @@ export default function App() {
 
   // Drop a selection whose element no longer exists (deleted, undone, room re-derived).
   const selection = useMemo<Selection>(() => {
-    if (!rawSelection || !model) return null;
-    const f = model.floors[0];
+    if (!rawSelection || !plan) return null;
+    const f = plan.floors[0];
     const list: { id: string }[] = { wall: f.walls, opening: f.openings, room: f.rooms, furniture: f.furniture }[rawSelection.kind];
     return list.some((x) => x.id === rawSelection.id) ? rawSelection : null;
-  }, [rawSelection, model]);
+  }, [rawSelection, plan]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -121,12 +134,12 @@ export default function App() {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); }
       else if (mod && e.key.toLowerCase() === "y") { e.preventDefault(); redo(); }
-      else if ((e.key === "Delete" || e.key === "Backspace") && selection && model) {
-        if (selection.kind === "wall") edit(deleteWall(model, selection.id));
-        if (selection.kind === "opening") edit(deleteOpening(model, selection.id));
-        if (selection.kind === "furniture") edit(deleteFurniture(model, selection.id));
-      } else if (!mod && e.key.toLowerCase() === "r" && selection?.kind === "furniture" && model) {
-        edit(rotateFurniture(model, selection.id, e.shiftKey ? -90 : 90));
+      else if ((e.key === "Delete" || e.key === "Backspace") && selection && plan) {
+        if (selection.kind === "wall") editPlan(deleteWall(plan, selection.id));
+        if (selection.kind === "opening") editPlan(deleteOpening(plan, selection.id));
+        if (selection.kind === "furniture") editPlan(deleteFurniture(plan, selection.id));
+      } else if (!mod && e.key.toLowerCase() === "r" && selection?.kind === "furniture" && plan) {
+        editPlan(rotateFurniture(plan, selection.id, e.shiftKey ? -90 : 90));
       }
     };
     window.addEventListener("keydown", onKey);
@@ -224,7 +237,18 @@ export default function App() {
   if (error && !model) {
     return <div className="grid h-full place-items-center p-6 text-center text-slate-600">{error}</div>;
   }
-  if (!model) return <div className="grid h-full place-items-center text-slate-500">Loading project…</div>;
+  if (!model || !plan) return <div className="grid h-full place-items-center text-slate-500">Loading project…</div>;
+
+  const pickFloor = (i: number) => { setFloorIx(i); setSelection(null); setCloseUp(null); setFocus(null); setWalking(false); };
+  const onAddFloor = () => { edit(addFloor(model)); pickFloor(model.floors.length); };
+  const onRemoveFloor = () => {
+    if (fi === 0) return;
+    const f = model.floors[fi];
+    const what = f.rooms.length || f.walls.length ? ` and everything drawn on it (${f.walls.length} walls, ${f.rooms.length} rooms)` : "";
+    if (!window.confirm(`Delete the ${floorName(fi).toLowerCase()}${what}? You can undo this.`)) return;
+    edit(removeFloor(model, fi));
+    pickFloor(fi - 1);
+  };
 
   const show2D = layout !== "3D Model";
   const show3D = layout !== "2D Plan";
@@ -244,13 +268,16 @@ export default function App() {
         <section className="flex min-w-0 flex-col gap-3">
           <div className="rounded-2xl border border-black/5 bg-white shadow-sm"><Stepper active={reading ? 1 : 3} /></div>
 
-          <div className="flex items-center gap-1 self-start rounded-xl border border-black/5 bg-white p-1 shadow-sm">
-            {(["Compare", "2D Plan", "3D Model"] as Layout[]).map((l) => (
-              <button key={l} onClick={() => setLayout(l)}
-                className={`rounded-lg px-4 py-1.5 text-sm font-medium ${layout === l ? "bg-brand-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>
-                {l}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1 rounded-xl border border-black/5 bg-white p-1 shadow-sm">
+              {(["Compare", "2D Plan", "3D Model"] as Layout[]).map((l) => (
+                <button key={l} onClick={() => setLayout(l)}
+                  className={`rounded-lg px-4 py-1.5 text-sm font-medium ${layout === l ? "bg-brand-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            <FloorBar count={model.floors.length} active={fi} onPick={pickFloor} onAdd={onAddFloor} onRemove={onRemoveFloor} />
           </div>
 
           <div className={`grid min-h-[480px] flex-1 gap-3 ${layout === "Compare" ? "md:grid-cols-3" : ""}`}>
@@ -260,25 +287,26 @@ export default function App() {
               </Card>
             )}
             {show2D && (
-              <Card title="2D Floor Plan" onExpand={layout === "Compare" ? () => setLayout("2D Plan") : undefined}>
+              <Card title={`2D Floor Plan${model.floors.length > 1 ? ` · ${floorName(fi)}` : ""}`} onExpand={layout === "Compare" ? () => setLayout("2D Plan") : undefined}>
                 <PlanView2D
-                  model={model} layers={layers} selection={selection} onSelect={setSelection}
-                  editable tool={tool} onTool={setTool} onEdit={edit}
+                  model={plan} below={fi > 0 ? model.floors[fi - 1] : undefined} layers={layers} selection={selection} onSelect={setSelection}
+                  editable tool={tool} onTool={setTool} onEdit={editPlan}
                   history={{ undo, redo, canUndo: history.canUndo, canRedo: history.canRedo }}
                 />
               </Card>
             )}
             {show3D && (
               <Card title={`3D Model · ${view} view`} accent onExpand={layout === "Compare" ? () => setLayout("3D Model") : undefined}>
-                {closeUp && <CloseUp model={model} target={closeUp} onEdit={(m) => edit(m)} onClose={() => setCloseUp(null)} />}
+                {closeUp && <CloseUp model={plan} target={closeUp} onEdit={(m) => editPlan(m)} onClose={() => setCloseUp(null)} />}
                 <ExploreBar model={model} focus={focus} walking={walking} onFocus={goTo} onWalk={setWalking} />
                 <CutControl value={layers.cut} onChange={(cut) => setLayers((l) => ({ ...l, cut }))} />
                 <Viewer3D
-                  model={model} layers={layers} view={view} mode={mode}
+                  model={model} layers={layers} view={view} mode={mode} activeFloor={fi}
                   selectedWall={selection?.kind === "wall" ? selection.id : null}
-                  onSelectWall={(id) => setSelection(id ? { kind: "wall", id } : null)}
+                  onSelectWall={(id, f) => { if (f !== undefined) setFloorIx(f); setSelection(id ? { kind: "wall", id } : null); }}
                   onCanvas={setCanvas} onThumbnails={setThumbs}
-                  focus={focus} walking={walking} onFocus={goTo} onCloseUp={openCloseUp}
+                  focus={focus} walking={walking} onFocus={goTo}
+                  onCloseUp={(t, f) => { if (f !== undefined) setFloorIx(f); openCloseUp(t); }}
                 />
               </Card>
             )}
@@ -310,8 +338,8 @@ export default function App() {
 
         <div className="lg:col-span-2 xl:col-span-1">
           <RightPanel
-            model={model} layers={layers} onLayers={setLayers}
-            selection={selection} onSelect={setSelection} onEdit={edit} onCloseUp={openCloseUp}
+            model={plan} layers={layers} onLayers={setLayers}
+            selection={selection} onSelect={setSelection} onEdit={editPlan} onCloseUp={openCloseUp}
             onFocusRoom={(id) => goTo({ kind: "room", id })}
             footer={
               <DownloadMenu items={[
@@ -343,7 +371,13 @@ function ExploreBar({ model, focus, walking, onFocus, onWalk }: {
         className="rounded-lg border border-slate-200 bg-white/95 px-2 py-1.5 text-xs font-medium shadow-sm">
         <option value="house">Whole house</option>
         <option value="outside">Outside (eye level)</option>
-        {model.floors[0].rooms.map((r) => <option key={r.id} value={r.id}>Inside: {r.name}</option>)}
+        {model.floors.length === 1
+          ? model.floors[0].rooms.map((r) => <option key={r.id} value={r.id}>Inside: {r.name}</option>)
+          : model.floors.map((f, i) => (
+            <optgroup key={i} label={floorName(i)}>
+              {f.rooms.map((r) => <option key={r.id} value={r.id}>Inside: {r.name}</option>)}
+            </optgroup>
+          ))}
       </select>
       <button onClick={(e) => { e.currentTarget.blur(); onWalk(!walking); }}
         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold shadow-sm ${walking ? "bg-brand-600 text-white" : "border border-slate-200 bg-white/95 text-slate-700 hover:bg-slate-50"}`}>
@@ -353,8 +387,37 @@ function ExploreBar({ model, focus, walking, onFocus, onWalk }: {
       <span className="rounded-lg bg-ink/75 px-2 py-1 text-[11px] text-white">
         {walking ? "Drag the view to look around · W/↑ forward · S/↓ back · ←/→ turn · A/D step sideways · Shift runs"
           : focus?.kind === "room" ? "Drag to look around, up at the ceiling and down at the floor · scroll to zoom"
-            : "Double-click a room to step inside · double-click a wall for its close-up"}
+            : model.floors.length > 1 ? "Pick a floor above to look into it · double-click a room to step inside · walk up the stairs"
+              : "Double-click a room to step inside · double-click a wall for its close-up"}
       </span>
+    </div>
+  );
+}
+
+/** Floor tabs: pick the floor to draw on and look into, or add one on top. */
+function FloorBar({ count, active, onPick, onAdd, onRemove }: {
+  count: number; active: number; onPick: (i: number) => void; onAdd: () => void; onRemove: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 rounded-xl border border-black/5 bg-white p-1 shadow-sm" role="tablist" aria-label="Floors">
+      {Array.from({ length: count }, (_, i) => (
+        <button key={i} role="tab" aria-selected={active === i} onClick={() => onPick(i)}
+          className={`rounded-lg px-3 py-1.5 text-sm font-medium ${active === i ? "bg-brand-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>
+          {floorName(i).replace(" floor", "")}
+        </button>
+      ))}
+      {count < 5 && (
+        <button onClick={onAdd} title="Add a floor on top. The outer walls, windows and staircase carry up; you draw the rooms."
+          className="flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-50">
+          <Plus size={15} /> Floor
+        </button>
+      )}
+      {active > 0 && (
+        <button onClick={onRemove} aria-label={`Delete ${floorName(active).toLowerCase()}`} title={`Delete ${floorName(active).toLowerCase()}`}
+          className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600">
+          <Trash2 size={15} />
+        </button>
+      )}
     </div>
   );
 }

@@ -2,8 +2,9 @@ import { Component, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, OrthographicCamera, PerspectiveCamera, RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
-import type { BuildingModel, Focus, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
+import type { BuildingModel, Floor, Focus, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
 import { bbox, centroid, footprint, pointOnWall, solidSpans, spanRect, stairLayout, viewDirection, wallFrame } from "../lib/geometry";
+import { findRoom, floorBase, stairRise } from "../lib/floors";
 import type { CloseUpTarget } from "./CloseUp";
 
 const M = 1 / 1000; // model mm → scene metres
@@ -18,14 +19,16 @@ interface Props {
   layers: Layers;
   view: ViewName;
   mode: "2d" | "3d";
+  /** Floor being edited: the cutaway views show it and the floors below. */
+  activeFloor?: number;
   selectedWall: string | null;
-  onSelectWall: (id: string | null) => void;
+  onSelectWall: (id: string | null, floor?: number) => void;
   onCanvas?: (canvas: HTMLCanvasElement) => void;
   onThumbnails?: (thumbs: Partial<Record<ViewName, string>>) => void;
   focus?: Focus;
   walking?: boolean;
   onFocus?: (f: Focus) => void;
-  onCloseUp?: (t: CloseUpTarget) => void;
+  onCloseUp?: (t: CloseUpTarget, floor?: number) => void;
 }
 
 const EYE = 1600; // mm above the floor
@@ -95,21 +98,24 @@ function useToScene(model: BuildingModel) {
   }, [model]);
 }
 
-function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking, onFocus, onCloseUp }: Props) {
+function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking, onFocus, onCloseUp, activeFloor = 0 }: Props) {
   const S = useToScene(model);
-  const floor = model.floors[0];
   const plot = bbox(model.plot.polygon);
   const sb = model.plot.setbacks;
   const fp = footprint(model);
-  const base = floor.plinth;
+  const top = model.floors.length - 1;
   const showGround = view !== "Bottom";
   const elevation = ["North", "South", "East", "West", "Bottom"].includes(view);
   const cut = layers.cut === "auto" ? (elevation ? "roof" : "open") : layers.cut;
   // inside a room (or walking) you want a ceiling over your head, unless the doll-house cut is chosen
   const inside = walking || focus?.kind === "room";
-  const showRoof = (inside ? layers.cut !== "doll" : cut === "roof") && view !== "Top";
-  const wallTop = cut === "doll" || layers.cut === "doll" ? DOLL_HEIGHT : floor.height;
-  const focusRoom = focus?.kind === "room" ? floor.rooms.find((r) => r.id === focus.id) : undefined;
+  const focused = focus?.kind === "room" ? findRoom(model, focus.id) : null;
+  const doll = cut === "doll" || layers.cut === "doll";
+  // closed views show every storey; cutaways show the floor being worked on and the ones below it
+  const lit = Math.min(focused?.floor ?? activeFloor, top);
+  const closed = inside ? !doll : cut === "roof";
+  const shownTop = closed ? top : lit;
+  const showRoof = closed && view !== "Top" && shownTop === top;
 
   return (
     <group>
@@ -137,64 +143,118 @@ function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking,
       )}
 
       {/* Plinth */}
-      {fp.w > 0 && <Box at={S([fp.cx, fp.cy], base / 2)} size={[fp.w, base, fp.h]} color="#cfc9bd" />}
+      {fp.w > 0 && <Box at={S([fp.cx, fp.cy], model.floors[0].plinth / 2)} size={[fp.w, model.floors[0].plinth, fp.h]} color="#cfc9bd" />}
 
-      {floor.rooms.map((r) => (
-        <RoomFloor key={r.id} model={model} room={r}
-          onDoubleClick={walking ? undefined : () => onFocus?.({ kind: "room", id: r.id })}
-          onShiftClick={walking ? undefined : () => onCloseUp?.({ kind: "floor", roomId: r.id })} />
+      {model.floors.slice(0, shownTop + 1).map((floor, i) => (
+        <Storey key={i} model={model} index={i} floor={floor}
+          wallTop={i === shownTop && doll ? DOLL_HEIGHT : floor.height}
+          slab={i < shownTop || showRoof} parapet={i === top && showRoof}
+          furniture={layers.furniture}
+          selectedWall={i === lit ? selectedWall : null}
+          lamp={focused?.floor === i ? focused.room : undefined}
+          onSelectWall={walking ? () => {} : (id) => onSelectWall(id, i)}
+          onOpenWall={walking ? undefined : (id) => onCloseUp?.({ kind: "wall", id }, i)}
+          onRoom={walking ? undefined : (id, shift) => (shift ? onCloseUp?.({ kind: "floor", roomId: id }, i) : onFocus?.({ kind: "room", id }))}
+        />
       ))}
-      {focusRoom && (
-        <pointLight position={S(centroid(focusRoom.polygon), base + floor.height - 300)} intensity={6} distance={12} decay={1.6} color="#fff4e0" />
-      )}
+    </group>
+  );
+}
 
-      {floor.rooms.filter((r) => r.type === "stair").flatMap((r) =>
-        stairLayout(r, floor.height).map((t, i) => {
+/** One storey: floor finishes, stair, walls, doors and windows, furniture, and the slab above
+ * (the next storey's floor, or the roof). */
+function Storey({ model, index, floor, wallTop, slab, parapet, furniture, selectedWall, lamp, onSelectWall, onOpenWall, onRoom }: {
+  model: BuildingModel; index: number; floor: Floor; wallTop: number; slab: boolean; parapet: boolean; furniture: boolean;
+  selectedWall: string | null; lamp?: Room;
+  onSelectWall: (id: string) => void; onOpenWall?: (id: string) => void; onRoom?: (id: string, shift: boolean) => void;
+}) {
+  const S = useToScene(model);
+  const base = floorBase(model, index);
+  const fp = footprint(model, index);
+  const cut = wallTop < floor.height;
+  const stairs = floor.rooms.filter((r) => r.type === "stair");
+  const below = index > 0 ? model.floors[index - 1].rooms.filter((r) => r.type === "stair").map((r) => r.polygon) : [];
+  const hasAbove = index < model.floors.length - 1;
+  return (
+    <group>
+      {/* upstairs, the stair room is open to the flight coming up from below */}
+      {floor.rooms.filter((r) => index === 0 || r.type !== "stair").map((r) => (
+        <RoomFloor key={r.id} model={model} room={r} base={base} holes={below}
+          onDoubleClick={onRoom && (() => onRoom(r.id, false))} onShiftClick={onRoom && (() => onRoom(r.id, true))} />
+      ))}
+      {lamp && <pointLight position={S(centroid(lamp.polygon), base + floor.height - 300)} intensity={6} distance={12} decay={1.6} color="#fff4e0" />}
+
+      {stairs.flatMap((r) =>
+        stairLayout(r, stairRise(floor)).map((t, i) => {
           const [x0, y0, x1, y1] = t.rect;
           return <Box key={`${r.id}-${i}`} at={S([(x0 + x1) / 2, (y0 + y1) / 2], base + t.top / 2)} size={[x1 - x0, t.top, y1 - y0]} color="#dcdad5" />;
         }),
       )}
 
       {floor.walls.map((w) => (
-        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id}
-          onSelect={walking ? () => {} : onSelectWall} onOpen={walking ? undefined : () => onCloseUp?.({ kind: "wall", id: w.id })} />
+        <WallMesh key={w.id} model={model} floor={floor} base={base} wall={w} top={wallTop} selected={selectedWall === w.id}
+          onSelect={onSelectWall} onOpen={onOpenWall && (() => onOpenWall(w.id))} />
       ))}
       {floor.openings.map((o) => {
-        const shown = wallTop < floor.height ? clipOpening(o, wallTop) : o;
-        return shown.height > 0 && <OpeningMesh key={o.id} model={model} opening={shown} cut={wallTop < floor.height} />;
+        const shown = cut ? clipOpening(o, wallTop) : o;
+        return shown.height > 0 && <OpeningMesh key={o.id} model={model} floor={floor} base={base} opening={shown} cut={cut} />;
       })}
-      {layers.furniture && floor.furniture.map((f) => <FurnitureMesh key={f.id} model={model} f={f} />)}
+      {furniture && floor.furniture.map((f) => <FurnitureMesh key={f.id} model={model} base={base} f={f} />)}
 
-      {showRoof && fp.w > 0 && (
-        <group>
-          <Box at={S([fp.cx, fp.cy], base + floor.height + floor.slab / 2)} size={[fp.w + 300, floor.slab, fp.h + 300]} color="#efece6" />
-          {[
-            [[fp.cx, fp.y0 - 100], [fp.w + 300, 150]],
-            [[fp.cx, fp.y1 + 100], [fp.w + 300, 150]],
-            [[fp.x0 - 100, fp.cy], [150, fp.h + 300]],
-            [[fp.x1 + 100, fp.cy], [150, fp.h + 300]],
-          ].map(([c, s], i) => (
-            <Box key={i} at={S(c as Point, base + floor.height + floor.slab + model.roof.parapet / 2)}
-              size={[(s as number[])[0], model.roof.parapet, (s as number[])[1]]} color="#f4f1ea" />
-          ))}
-        </group>
+      {slab && fp.w > 0 && (
+        <Slab model={model} box={fp} at={base + floor.height} thickness={floor.slab} overhang={hasAbove ? 0 : 150}
+          holes={hasAbove ? stairs.map((r) => r.polygon) : []} />
       )}
+      {parapet && fp.w > 0 && [
+        [[fp.cx, fp.y0 - 100], [fp.w + 300, 150]],
+        [[fp.cx, fp.y1 + 100], [fp.w + 300, 150]],
+        [[fp.x0 - 100, fp.cy], [150, fp.h + 300]],
+        [[fp.x1 + 100, fp.cy], [150, fp.h + 300]],
+      ].map(([c, sz], i) => (
+        <Box key={i} at={S(c as Point, base + floor.height + floor.slab + model.roof.parapet / 2)}
+          size={[(sz as number[])[0], model.roof.parapet, (sz as number[])[1]]} color="#f4f1ea" />
+      ))}
     </group>
   );
 }
 
-/** Room floor finish as an extruded polygon, so L-shaped rooms render correctly. */
-function RoomFloor({ model, room, onDoubleClick, onShiftClick }: {
-  model: BuildingModel; room: Room; onDoubleClick?: () => void; onShiftClick?: () => void;
+/** A concrete slab over a storey's footprint, with openings cut where the stair goes up. */
+function Slab({ model, box, at, thickness, overhang, holes }: {
+  model: BuildingModel; box: { x0: number; y0: number; x1: number; y1: number }; at: number; thickness: number; overhang: number; holes: Point[][];
 }) {
   const p = bbox(model.plot.polygon);
+  const key = JSON.stringify([box.x0, box.y0, box.x1, box.y1, holes, overhang]);
   const geometry = useMemo(() => {
-    const shape = new THREE.Shape(room.polygon.map(([x, y]) => new THREE.Vector2((x - p.cx) * M, (y - p.cy) * M)));
-    return new THREE.ExtrudeGeometry(shape, { depth: 20 * M, bevelEnabled: false });
-  }, [room.polygon, p.cx, p.cy]);
+    const v = ([x, y]: Point) => new THREE.Vector2((x - p.cx) * M, (y - p.cy) * M);
+    const o = overhang;
+    const corners: Point[] = [[box.x0 - o, box.y0 - o], [box.x1 + o, box.y0 - o], [box.x1 + o, box.y1 + o], [box.x0 - o, box.y1 + o]];
+    const shape = new THREE.Shape(corners.map(v));
+    for (const h of holes) shape.holes.push(new THREE.Path(h.map(v)));
+    return new THREE.ExtrudeGeometry(shape, { depth: thickness * M, bevelEnabled: false });
+  }, [key, thickness, p.cx, p.cy]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => () => geometry.dispose(), [geometry]);
   return (
-    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, model.floors[0].plinth * M, 0]} receiveShadow
+    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, at * M, 0]} castShadow receiveShadow>
+      <meshStandardMaterial color="#efece6" roughness={0.9} side={THREE.DoubleSide} />
+    </mesh>
+  );
+}
+
+/** Room floor finish as an extruded polygon, so L-shaped rooms render correctly. */
+function RoomFloor({ model, room, base, holes = [], onDoubleClick, onShiftClick }: {
+  model: BuildingModel; room: Room; base: number; holes?: Point[][]; onDoubleClick?: () => void; onShiftClick?: () => void;
+}) {
+  const p = bbox(model.plot.polygon);
+  const key = JSON.stringify([room.polygon, holes]);
+  const geometry = useMemo(() => {
+    const v = ([x, y]: Point) => new THREE.Vector2((x - p.cx) * M, (y - p.cy) * M);
+    const shape = new THREE.Shape(room.polygon.map(v));
+    for (const h of holes) shape.holes.push(new THREE.Path(h.map(v)));
+    return new THREE.ExtrudeGeometry(shape, { depth: 20 * M, bevelEnabled: false });
+  }, [key, p.cx, p.cy]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => geometry.dispose(), [geometry]);
+  return (
+    <mesh geometry={geometry} rotation-x={-Math.PI / 2} position={[0, base * M, 0]} receiveShadow
       onDoubleClick={(e) => { e.stopPropagation(); if (e.shiftKey) onShiftClick?.(); else onDoubleClick?.(); }}>
       <meshStandardMaterial color={FLOOR_COLORS[room.type] ?? "#e5e0d6"} roughness={0.85} />
     </mesh>
@@ -221,14 +281,12 @@ function clipOpening(o: Opening, top: number): Opening {
   return { ...o, height: Math.max(0, Math.min(o.height, top - o.sill)) };
 }
 
-function WallMesh({ model, wall, top, selected, onSelect, onOpen }: {
-  model: BuildingModel; wall: Wall; top: number; selected: boolean; onSelect: (id: string) => void; onOpen?: () => void;
+function WallMesh({ model, floor, base, wall, top, selected, onSelect, onOpen }: {
+  model: BuildingModel; floor: Floor; base: number; wall: Wall; top: number; selected: boolean; onSelect: (id: string) => void; onOpen?: () => void;
 }) {
   const S = useToScene(model);
-  const floor = model.floors[0];
   const { u } = wallFrame(wall);
   const rotY = Math.atan2(u[1], u[0]);
-  const base = floor.plinth;
   const H = floor.height;
   const color = selected ? "#8b6cff" : wall.type === "exterior" ? "#f2ede4" : "#faf8f3";
 
@@ -250,13 +308,14 @@ function WallMesh({ model, wall, top, selected, onSelect, onOpen }: {
   );
 }
 
-function OpeningMesh({ model, opening: o, cut = false }: { model: BuildingModel; opening: Opening; cut?: boolean }) {
+function OpeningMesh({ model, floor, base, opening: o, cut = false }: {
+  model: BuildingModel; floor: Floor; base: number; opening: Opening; cut?: boolean;
+}) {
   const S = useToScene(model);
-  const floor = model.floors[0];
-  const wall = floor.walls.find((w) => w.id === o.wall)!;
+  const wall = floor.walls.find((w) => w.id === o.wall);
+  if (!wall) return null;
   const { u, n } = wallFrame(wall);
   const rotY = Math.atan2(u[1], u[0]);
-  const base = floor.plinth;
   const at = (s: number, z: number, k = 0) => S(pointOnWall(wall, s, k), base + z);
 
   if (o.kind === "window" || o.kind === "ventilator") {
@@ -320,10 +379,10 @@ function OpeningMesh({ model, opening: o, cut = false }: { model: BuildingModel;
   return null;
 }
 
-function FurnitureMesh({ model, f }: { model: BuildingModel; f: Furniture }) {
+function FurnitureMesh({ model, base: level, f }: { model: BuildingModel; base: number; f: Furniture }) {
   const S = useToScene(model);
   const [w, d, h] = f.size;
-  const base = model.floors[0].plinth + 20;
+  const base = level + 20;
   // local part: (x, y) offset in plan mm, z0 bottom, size, colour
   const part = (x: number, y: number, z0: number, pw: number, pd: number, ph: number, color: string, key: string | number) => (
     <mesh key={key} position={[x * M, (z0 + ph / 2) * M, -y * M]} castShadow receiveShadow>
@@ -436,7 +495,8 @@ function viewPose(model: BuildingModel, view: ViewName, mode: "2d" | "3d", aspec
   const p = bbox(model.plot.polygon);
   // Perspective FOV is vertical, so narrow viewports need the camera further back.
   const D = Math.hypot(p.w, p.h) * M * (mode === "3d" ? 1.25 / Math.min(1, aspect) : 2);
-  const target = new THREE.Vector3(0, mode === "3d" ? 1.5 : 2, 0);
+  const storeys = model.floors.length - 1;
+  const target = new THREE.Vector3(0, (mode === "3d" ? 1.5 : 2) + storeys * 1.6, 0);
   // a small z offset fixes the azimuth so the plan reads with the road at the bottom
   if (view === "Top") return { pos: new THREE.Vector3(0, D, D * 0.01), target: new THREE.Vector3(0, 0, 0) };
   if (view === "Bottom") return { pos: new THREE.Vector3(0, -D, D * 0.01), target: new THREE.Vector3(0, 0, 0) };
@@ -453,17 +513,18 @@ function focusKey(f: Focus | undefined) {
 
 /** Where the camera goes for a focus, and how far it may orbit/zoom without leaving the room. */
 function focusPose(model: BuildingModel, focus: Focus) {
-  const floor = model.floors[0];
   const p = bbox(model.plot.polygon);
   const S = (pt: Point, h: number) => new THREE.Vector3((pt[0] - p.cx) * M, h * M, -(pt[1] - p.cy) * M);
   if (focus?.kind === "room") {
-    const room = floor.rooms.find((r) => r.id === focus.id);
-    if (room) {
+    const found = findRoom(model, focus.id);
+    if (found) {
+      const { room } = found;
+      const level = floorBase(model, found.floor);
       const b = bbox(room.polygon);
       const c = centroid(room.polygon);
       const reach = Math.max(400, 0.42 * Math.min(b.w, b.h)); // stays inside the room while orbiting
-      const target = S(c, floor.plinth + 1300);
-      const pos = S([c[0] - reach * 0.7, c[1] - reach * 0.7], floor.plinth + EYE);
+      const target = S(c, level + 1300);
+      const pos = S([c[0] - reach * 0.7, c[1] - reach * 0.7], level + EYE);
       return { pos, target, maxDistance: reach * M * 1.05 };
     }
   }
@@ -541,6 +602,8 @@ function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: V
   return null;
 }
 
+const FOOT = 180; // mm: how far a step can reach under you
+
 /** Keys held for walking; the on-screen pad adds to the same set. */
 export const walkKeys = new Set<string>();
 
@@ -549,31 +612,64 @@ export const walkKeys = new Set<string>();
  * Walls block you; doorways and openings let you through. */
 function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
   const { camera, gl } = useThree();
-  const floor = model.floors[0];
   const p = bbox(model.plot.polygon);
   const look = useRef({ yaw: 0, pitch: 0 });
 
-  // obstacles in plan mm: wall solid spans (with their door/window gaps), plus a body radius
-  const obstacles = useMemo(() => {
+  // per storey: its level, the wall pieces that block you (doorways let you through), the floor area,
+  // the stair treads you can climb and the stairwell you can't stand over
+  const storeys = useMemo(() => {
     const R = 220;
-    const rects = floor.walls.flatMap((w) => solidSpans(w, floor.openings.filter((o) => o.kind === "door" || o.kind === "opening"))
-      .map(([s0, s1]) => spanRect(w, s0, s1, -w.thickness / 2 - R, w.thickness / 2 + R)));
-    return rects.map((r) => bbox(r));
-  }, [floor]);
-  const blocked = (x: number, y: number) =>
-    x < p.x0 + 200 || x > p.x1 - 200 || y < p.y0 - 6000 || y > p.y1 - 200 || obstacles.some((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1);
+    const inside = (pt: Point, b: { x0: number; y0: number; x1: number; y1: number }) => pt[0] > b.x0 && pt[0] < b.x1 && pt[1] > b.y0 && pt[1] < b.y1;
+    return model.floors.map((floor, i) => {
+      const base = floorBase(model, i);
+      const walls = floor.walls.flatMap((w) => solidSpans(w, floor.openings.filter((o) => o.kind === "door" || o.kind === "opening"))
+        .map(([s0, s1]) => bbox(spanRect(w, s0, s1, -w.thickness / 2 - R, w.thickness / 2 + R))));
+      const treads = floor.rooms.filter((r) => r.type === "stair")
+        // a tread holds you up while it's under part of your foot, not just under your centre
+        .flatMap((r) => stairLayout(r, stairRise(floor)).map((t) => ({ b: { x0: t.rect[0] - FOOT, y0: t.rect[1] - FOOT, x1: t.rect[2] + FOOT, y1: t.rect[3] + FOOT }, h: base + t.top })));
+      const well = i > 0 ? model.floors[i - 1].rooms.filter((r) => r.type === "stair").map((r) => bbox(r.polygon)) : [];
+      const fp = footprint(model, i);
+      return {
+        base, walls, treads,
+        // standing height of this storey's floor at a point, or null where there is none
+        floorAt: (pt: Point) => (inside(pt, fp) && !well.some((b) => inside(pt, b)) ? base : null),
+        inside,
+      };
+    });
+  }, [model]);
+
+  /** Highest surface under you that you can step onto (up to one tread-and-a-bit above your feet). */
+  const groundAt = (pt: Point, feet: number) => {
+    let best = 0;
+    for (const st of storeys) {
+      const f = st.floorAt(pt);
+      if (f !== null && f <= feet + 500 && f > best) best = f;
+      for (const t of st.treads) if (t.h <= feet + 500 && t.h > best && st.inside(pt, t.b)) best = t.h;
+    }
+    return best;
+  };
+  /** The storey you're on: the highest whose floor is at or below your feet. */
+  const storeyAt = (feet: number) => {
+    let i = 0;
+    storeys.forEach((st, j) => { if (st.base <= feet + 300) i = j; });
+    return storeys[i];
+  };
+  const blocked = (x: number, y: number, feet: number) =>
+    x < p.x0 + 200 || x > p.x1 - 200 || y < p.y0 - 6000 || y > p.y1 - 200 ||
+    (storeyAt(feet)?.walls ?? []).some((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1);
 
   // starting place: inside the chosen room, or 1.5 m in front of the main door facing it
   useEffect(() => {
-    const room = focus?.kind === "room" ? floor.rooms.find((r) => r.id === focus.id) : undefined;
-    const walls = new Map(floor.walls.map((w) => [w.id, w]));
-    const mainDoor = floor.openings
+    const ground = model.floors[0];
+    const found = focus?.kind === "room" ? findRoom(model, focus.id) : null;
+    const walls = new Map(ground.walls.map((w) => [w.id, w]));
+    const mainDoor = ground.openings
       .filter((o) => o.kind === "door" && walls.get(o.wall)?.type === "exterior")
       .map((o) => pointOnWall(walls.get(o.wall)!, o.offset + o.width / 2))
       .sort((a, b) => a[1] - b[1])[0];
-    const start: Point = room ? centroid(room.polygon) : mainDoor ? [mainDoor[0], mainDoor[1] - 1500] : [p.cx, p.y0 + 1200];
-    const target: Point = room ? [p.cx, p.cy] : mainDoor ?? [p.cx, p.cy];
-    const eye = (room ? floor.plinth : 0) + EYE;
+    const start: Point = found ? centroid(found.room.polygon) : mainDoor ? [mainDoor[0], mainDoor[1] - 1500] : [p.cx, p.y0 + 1200];
+    const target: Point = found ? [p.cx, p.cy] : mainDoor ?? [p.cx, p.cy];
+    const eye = (found ? floorBase(model, found.floor) : 0) + EYE;
     camera.position.set((start[0] - p.cx) * M, eye * M, -(start[1] - p.cy) * M);
     // yaw from the direction to the target (scene x, z)
     const dx = (target[0] - start[0]), dz = -(target[1] - start[1]);
@@ -636,15 +732,15 @@ function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
       const speed = (k.has("ShiftLeft") || k.has("ShiftRight") ? 3 : 1.4) * t;
       const move = dir.multiplyScalar(fwd * speed).add(right.multiplyScalar(side * speed));
       // plan coordinates of where we are and where we'd go; slide along walls axis by axis
+      const feet = camera.position.y / M - EYE;
       const x = camera.position.x / M + p.cx, y = -camera.position.z / M + p.cy;
-      if (!blocked(x + move.x / M, y)) camera.position.x += move.x;
-      if (!blocked(camera.position.x / M + p.cx, y - move.z / M)) camera.position.z += move.z;
+      if (!blocked(x + move.x / M, y, feet)) camera.position.x += move.x;
+      if (!blocked(camera.position.x / M + p.cx, y - move.z / M, feet)) camera.position.z += move.z;
     }
-    // step up onto the plinth inside the house
-    const x = camera.position.x / M + p.cx, y = -camera.position.z / M + p.cy;
-    const fp = footprint(model);
-    const onPlinth = x > fp.x0 && x < fp.x1 && y > fp.y0 && y < fp.y1;
-    camera.position.y += (((onPlinth ? floor.plinth : 0) + EYE) * M - camera.position.y) * Math.min(1, t * 10);
+    // follow the ground: plinth, stair treads, upper floors (and drop down a stairwell)
+    const feet = camera.position.y / M - EYE;
+    const g = groundAt([camera.position.x / M + p.cx, -camera.position.z / M + p.cy], feet);
+    camera.position.y += ((g + EYE) * M - camera.position.y) * Math.min(1, t * 10);
   });
 
   return null;

@@ -80,8 +80,9 @@ export function viewDirection(model: BuildingModel, view: ViewName): Point | nul
   return [v[0] / len, v[1] / len];
 }
 
-export function footprint(model: BuildingModel) {
-  const all = model.floors[0].walls;
+/** Outer bounding box of a floor's walls (ground floor by default), wall thickness included. */
+export function footprint(model: BuildingModel, floorIndex = 0) {
+  const all = model.floors[floorIndex]?.walls ?? [];
   let ext = all.some((w) => w.type === "exterior") ? all.filter((w) => w.type === "exterior") : all;
   if (!ext.length) {
     const p = bbox(model.plot.polygon);
@@ -100,14 +101,15 @@ export function roomSize(room: Room) {
 }
 
 export function summary(model: BuildingModel) {
-  const floor = model.floors[0];
   const plot = bbox(model.plot.polygon);
-  const fp = footprint(model);
-  const count = (t: string) => floor.rooms.filter((r) => r.type === t);
+  const rooms = model.floors.flatMap((f) => f.rooms);
+  const count = (t: string) => rooms.filter((r) => r.type === t);
+  const builtUp = model.floors.reduce((sum, _, i) => { const fp = footprint(model, i); return sum + fp.w * fp.h; }, 0);
   return {
     plot,
+    floors: model.floors.length,
     plotArea: sqft(polygonArea(model.plot.polygon)),
-    builtUp: sqft(fp.w * fp.h),
+    builtUp: sqft(builtUp),
     bedrooms: count("bedroom").length,
     toilets: count("toilet").length,
     parking: count("parking"),
