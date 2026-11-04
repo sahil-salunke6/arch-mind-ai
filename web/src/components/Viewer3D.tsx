@@ -48,7 +48,7 @@ export default function Viewer3D(props: Props) {
       {props.walking ? (
         <Walker model={model} focus={props.focus ?? null} />
       ) : (
-        <OrbitControls key={`${mode}-${focusKey(props.focus)}`} makeDefault enableDamping dampingFactor={0.12} zoomSpeed={1.6} {...orbitLimits(model, props.focus ?? null)} />
+        <OrbitControls key={`${mode}-${focusKey(props.focus)}`} makeDefault enableDamping dampingFactor={0.12} zoomSpeed={1.6} zoomToCursor={!props.focus} {...orbitLimits(model, props.focus ?? null)} />
       )}
       {!props.walking && <CameraRig key={mode} model={model} view={props.view} mode={mode} focus={props.focus ?? null} />}
       <Thumbnails model={model} onThumbnails={props.onThumbnails} />
@@ -462,48 +462,59 @@ function orbitLimits(model: BuildingModel, focus: Focus) {
 }
 
 function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: ViewName; mode: "2d" | "3d"; focus: Focus }) {
-  const { camera, controls, size } = useThree() as unknown as {
+  const { camera, controls, size, invalidate } = useThree() as unknown as {
     camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
     controls: (THREE.EventDispatcher<{ start: object }> & { target: THREE.Vector3; update: () => void }) | null;
     size: { width: number; height: number };
+    invalidate: () => void;
   };
-  const goal = useRef<{ pos: THREE.Vector3; target: THREE.Vector3; zoom: number; until: number } | null>(null);
+  const touched = useRef(false); // has the user dragged/zoomed since the last view was applied?
   const plotKey = JSON.stringify(model.plot.polygon);
   const ready = size.width > 80 && size.height > 80; // the panel is still laying out below this
   const fKey = focusKey(focus);
 
-  // Fly to a view only when the user picks one (view, 2D/3D, room focus) or the plot changes,
-  // not on every autosave or panel resize, so zoom and rotation aren't snapped back.
+  // Put the camera on the chosen view at once, in this effect: no reliance on animation frames,
+  // which a busy or background tab may deliver late. Runs only when the user picks a view, 2D/3D
+  // mode or room focus (or the plot changes), never on autosave or resize, so zoom/rotation stay put.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || !controls) return;
     const p = bbox(model.plot.polygon);
-    const extent = Math.max(p.w, p.h) * M * 1.1;
     const pose = focusPose(model, focus) ?? viewPose(model, view, mode, size.width / size.height);
-    goal.current = { pos: pose.pos, target: pose.target, zoom: Math.min(size.width, size.height) / extent, until: performance.now() + 1500 };
-  }, [view, mode, fKey, plotKey, ready, camera]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // the moment the user drags or zooms, they're in charge
-  useEffect(() => {
-    if (!controls) return;
-    const stop = () => { goal.current = null; };
-    controls.addEventListener("start", stop);
-    return () => controls.removeEventListener("start", stop);
-  }, [controls]);
-
-  useFrame((_, dt) => {
-    const g = goal.current;
-    if (!g || !controls) return;
-    const done = performance.now() > g.until;
-    const k = done ? 1 : 1 - Math.exp(-Math.min(dt, 0.1) * 7);
-    camera.position.lerp(g.pos, k);
-    controls.target.lerp(g.target, k);
+    camera.position.copy(pose.pos);
+    controls.target.copy(pose.target);
     if (camera instanceof THREE.OrthographicCamera) {
-      camera.zoom += (g.zoom - camera.zoom) * k;
+      camera.zoom = Math.min(size.width, size.height) / (Math.max(p.w, p.h) * M * 1.1);
+      camera.updateProjectionMatrix();
+    }
+    camera.lookAt(pose.target);
+    controls.update();
+    invalidate();
+    touched.current = false;
+  }, [view, mode, fKey, plotKey, ready, camera, controls]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // when the panel is resized (layout switch, window resize) re-frame the view, unless the user has
+  // already moved the camera themselves
+  const sizeKey = `${Math.round(size.width / 40)}x${Math.round(size.height / 40)}`;
+  useEffect(() => {
+    if (!ready || !controls || touched.current) return;
+    const p = bbox(model.plot.polygon);
+    const pose = focusPose(model, focus) ?? viewPose(model, view, mode, size.width / size.height);
+    camera.position.copy(pose.pos);
+    controls.target.copy(pose.target);
+    if (camera instanceof THREE.OrthographicCamera) {
+      camera.zoom = Math.min(size.width, size.height) / (Math.max(p.w, p.h) * M * 1.1);
       camera.updateProjectionMatrix();
     }
     controls.update();
-    if (done || camera.position.distanceTo(g.pos) < 0.005) goal.current = null;
-  });
+    invalidate();
+  }, [sizeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!controls) return;
+    const mark = () => { touched.current = true; };
+    controls.addEventListener("start", mark);
+    return () => controls.removeEventListener("start", mark);
+  }, [controls]);
   return null;
 }
 
