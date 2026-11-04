@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { Component, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { OrbitControls, OrthographicCamera, PerspectiveCamera, PointerLockControls, RoundedBox } from "@react-three/drei";
+import { OrbitControls, OrthographicCamera, PerspectiveCamera, RoundedBox } from "@react-three/drei";
 import * as THREE from "three";
 import type { BuildingModel, Focus, Furniture, Layers, Opening, Point, Room, ViewName, Wall } from "../types";
 import { bbox, centroid, footprint, pointOnWall, solidSpans, spanRect, stairLayout, viewDirection, wallFrame } from "../lib/geometry";
@@ -30,7 +30,29 @@ interface Props {
 
 const EYE = 1600; // mm above the floor
 
+/** Keeps the rest of the app usable when the browser can't start WebGL (GPU off, driver crash). */
+class WebGLGuard extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="grid h-full place-items-center p-6 text-center text-sm text-slate-600">
+        <div>
+          <p className="font-semibold text-slate-800">The 3D view couldn't start</p>
+          <p className="mt-1">This browser has WebGL turned off or its graphics driver stopped. The plan, panels and exports still work.</p>
+          <button className="mt-3 rounded-lg bg-brand-600 px-3 py-1.5 text-white" onClick={() => this.setState({ failed: false })}>Try again</button>
+        </div>
+      </div>
+    );
+  }
+}
+
 export default function Viewer3D(props: Props) {
+  return <WebGLGuard><Viewer3DCanvas {...props} /></WebGLGuard>;
+}
+
+function Viewer3DCanvas(props: Props) {
   const { model } = props;
   // walking and looking around inside need perspective; the flat 2D camera only suits the 10 views
   const mode = props.walking || props.focus ? "3d" : props.mode;
@@ -40,7 +62,7 @@ export default function Viewer3D(props: Props) {
       dpr={[1, 2]}
       gl={{ preserveDrawingBuffer: true, antialias: true }}
       onCreated={({ gl }) => props.onCanvas?.(gl.domElement)}
-      onPointerMissed={() => props.onSelectWall(null)}
+      onPointerMissed={() => { if (!props.walking) props.onSelectWall(null); }}
       style={{ background: "linear-gradient(#eef1f7, #f8f8fb)" }}
     >
       <PerspectiveCamera makeDefault={mode === "3d"} fov={props.walking || props.focus?.kind === "room" ? 70 : props.focus ? 55 : 38} near={0.05} far={500} position={[30, 25, 30]} />
@@ -119,7 +141,8 @@ function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking,
 
       {floor.rooms.map((r) => (
         <RoomFloor key={r.id} model={model} room={r}
-          onDoubleClick={() => onFocus?.({ kind: "room", id: r.id })} onShiftClick={() => onCloseUp?.({ kind: "floor", roomId: r.id })} />
+          onDoubleClick={walking ? undefined : () => onFocus?.({ kind: "room", id: r.id })}
+          onShiftClick={walking ? undefined : () => onCloseUp?.({ kind: "floor", roomId: r.id })} />
       ))}
       {focusRoom && (
         <pointLight position={S(centroid(focusRoom.polygon), base + floor.height - 300)} intensity={6} distance={12} decay={1.6} color="#fff4e0" />
@@ -133,8 +156,8 @@ function Site({ model, layers, view, selectedWall, onSelectWall, focus, walking,
       )}
 
       {floor.walls.map((w) => (
-        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id} onSelect={onSelectWall}
-          onOpen={() => onCloseUp?.({ kind: "wall", id: w.id })} />
+        <WallMesh key={w.id} model={model} wall={w} top={wallTop} selected={selectedWall === w.id}
+          onSelect={walking ? () => {} : onSelectWall} onOpen={walking ? undefined : () => onCloseUp?.({ kind: "wall", id: w.id })} />
       ))}
       {floor.openings.map((o) => {
         const shown = wallTop < floor.height ? clipOpening(o, wallTop) : o;
@@ -518,13 +541,17 @@ function CameraRig({ model, view, mode, focus }: { model: BuildingModel; view: V
   return null;
 }
 
-/** First-person walking: mouse to look (after a click), W A S D or arrows to move, Shift to run.
+/** Keys held for walking; the on-screen pad adds to the same set. */
+export const walkKeys = new Set<string>();
+
+/** First-person walking. Drag the view to look around (no pointer lock needed, so it works in any
+ * browser or embedded window); W/↑ forward, S/↓ back, A/D sideways, ←/→ or Q/E to turn, Shift runs.
  * Walls block you; doorways and openings let you through. */
 function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
-  const { camera } = useThree();
-  const keys = useRef<Set<string>>(new Set());
+  const { camera, gl } = useThree();
   const floor = model.floors[0];
   const p = bbox(model.plot.polygon);
+  const look = useRef({ yaw: 0, pitch: 0 });
 
   // obstacles in plan mm: wall solid spans (with their door/window gaps), plus a body radius
   const obstacles = useMemo(() => {
@@ -536,50 +563,91 @@ function Walker({ model, focus }: { model: BuildingModel; focus: Focus }) {
   const blocked = (x: number, y: number) =>
     x < p.x0 + 200 || x > p.x1 - 200 || y < p.y0 - 6000 || y > p.y1 - 200 || obstacles.some((b) => x > b.x0 && x < b.x1 && y > b.y0 && y < b.y1);
 
+  // starting place: inside the chosen room, or 1.5 m in front of the main door facing it
   useEffect(() => {
     const room = focus?.kind === "room" ? floor.rooms.find((r) => r.id === focus.id) : undefined;
-    // outside: stand 1.5 m in front of the main door (the exterior door nearest the road), facing it
     const walls = new Map(floor.walls.map((w) => [w.id, w]));
     const mainDoor = floor.openings
       .filter((o) => o.kind === "door" && walls.get(o.wall)?.type === "exterior")
       .map((o) => pointOnWall(walls.get(o.wall)!, o.offset + o.width / 2))
       .sort((a, b) => a[1] - b[1])[0];
     const start: Point = room ? centroid(room.polygon) : mainDoor ? [mainDoor[0], mainDoor[1] - 1500] : [p.cx, p.y0 + 1200];
-    const look: Point = room ? [p.cx, p.cy] : mainDoor ?? [p.cx, p.cy];
+    const target: Point = room ? [p.cx, p.cy] : mainDoor ?? [p.cx, p.cy];
     const eye = (room ? floor.plinth : 0) + EYE;
     camera.position.set((start[0] - p.cx) * M, eye * M, -(start[1] - p.cy) * M);
-    camera.lookAt((look[0] - p.cx) * M, eye * M, -(look[1] - p.cy) * M);
-    const down = (e: KeyboardEvent) => keys.current.add(e.code);
-    const up = (e: KeyboardEvent) => keys.current.delete(e.code);
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    // yaw from the direction to the target (scene x, z)
+    const dx = (target[0] - start[0]), dz = -(target[1] - start[1]);
+    look.current = { yaw: Math.atan2(-dx, -dz), pitch: 0 };
+    camera.rotation.set(0, look.current.yaw, 0, "YXZ");
   }, [focusKey(focus), camera]); // eslint-disable-line react-hooks/exhaustive-deps -- camera: walking may switch from the 2D camera
 
+  // keyboard (ignored while typing in a field) and drag-to-look
+  useEffect(() => {
+    const typing = (e: KeyboardEvent) => e.target instanceof Element && !!e.target.closest("input, textarea, select");
+    const down = (e: KeyboardEvent) => {
+      if (typing(e)) return;
+      walkKeys.add(e.code);
+      if (e.code.startsWith("Arrow")) e.preventDefault(); // don't scroll the page
+    };
+    const up = (e: KeyboardEvent) => walkKeys.delete(e.code);
+    const blur = () => walkKeys.clear();
+    const el = gl.domElement;
+    let drag: { x: number; y: number } | null = null;
+    const pd = (e: PointerEvent) => { drag = { x: e.clientX, y: e.clientY }; el.setPointerCapture(e.pointerId); };
+    const pm = (e: PointerEvent) => {
+      if (!drag) return;
+      look.current.yaw -= (e.clientX - drag.x) * 0.005;
+      look.current.pitch = Math.max(-1.3, Math.min(1.3, look.current.pitch - (e.clientY - drag.y) * 0.005));
+      drag = { x: e.clientX, y: e.clientY };
+    };
+    const pu = () => { drag = null; };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    el.addEventListener("pointerdown", pd);
+    el.addEventListener("pointermove", pm);
+    el.addEventListener("pointerup", pu);
+    el.style.cursor = "grab";
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+      el.removeEventListener("pointerdown", pd);
+      el.removeEventListener("pointermove", pm);
+      el.removeEventListener("pointerup", pu);
+      el.style.cursor = "";
+      walkKeys.clear();
+    };
+  }, [gl]);
+
   useFrame((_, dt) => {
-    const k = keys.current;
+    const k = walkKeys;
+    const t = Math.min(dt, 0.1);
+    const turn = (k.has("ArrowLeft") || k.has("KeyQ") ? 1 : 0) - (k.has("ArrowRight") || k.has("KeyE") ? 1 : 0);
+    look.current.yaw += turn * 1.8 * t;
+    camera.rotation.set(look.current.pitch, look.current.yaw, 0, "YXZ");
+
     const fwd = (k.has("KeyW") || k.has("ArrowUp") ? 1 : 0) - (k.has("KeyS") || k.has("ArrowDown") ? 1 : 0);
-    const side = (k.has("KeyD") || k.has("ArrowRight") ? 1 : 0) - (k.has("KeyA") || k.has("ArrowLeft") ? 1 : 0);
-    if (!fwd && !side) return;
-    const dir = new THREE.Vector3();
-    camera.getWorldDirection(dir);
-    dir.y = 0;
-    dir.normalize();
-    const right = new THREE.Vector3().crossVectors(dir, new THREE.Vector3(0, 1, 0));
-    const speed = (k.has("ShiftLeft") || k.has("ShiftRight") ? 3 : 1.4) * Math.min(dt, 0.05);
-    const move = dir.multiplyScalar(fwd * speed).add(right.multiplyScalar(side * speed));
-    // plan coordinates of where we are and where we'd go; slide along walls axis by axis
+    const side = (k.has("KeyD") ? 1 : 0) - (k.has("KeyA") ? 1 : 0);
+    if (fwd || side) {
+      const yaw = look.current.yaw;
+      const dir = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      const speed = (k.has("ShiftLeft") || k.has("ShiftRight") ? 3 : 1.4) * t;
+      const move = dir.multiplyScalar(fwd * speed).add(right.multiplyScalar(side * speed));
+      // plan coordinates of where we are and where we'd go; slide along walls axis by axis
+      const x = camera.position.x / M + p.cx, y = -camera.position.z / M + p.cy;
+      if (!blocked(x + move.x / M, y)) camera.position.x += move.x;
+      if (!blocked(camera.position.x / M + p.cx, y - move.z / M)) camera.position.z += move.z;
+    }
+    // step up onto the plinth inside the house
     const x = camera.position.x / M + p.cx, y = -camera.position.z / M + p.cy;
-    const nx = x + move.x / M, ny = y - move.z / M;
-    if (!blocked(nx, y)) camera.position.x += move.x;
-    if (!blocked(camera.position.x / M + p.cx, ny)) camera.position.z += move.z;
-    // step up onto the plinth when inside the house
     const fp = footprint(model);
     const onPlinth = x > fp.x0 && x < fp.x1 && y > fp.y0 && y < fp.y1;
-    camera.position.y += (((onPlinth ? floor.plinth : 0) + EYE) * M - camera.position.y) * 0.2;
+    camera.position.y += (((onPlinth ? floor.plinth : 0) + EYE) * M - camera.position.y) * Math.min(1, t * 10);
   });
 
-  return <PointerLockControls />;
+  return null;
 }
 
 /** Development only: lets automated browser checks read the live camera (window.__view). */

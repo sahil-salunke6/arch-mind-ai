@@ -8,7 +8,7 @@ import { useHistory } from "./lib/history";
 import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
 import SketchView from "./components/SketchView";
-import Viewer3D from "./components/Viewer3D";
+import Viewer3D, { walkKeys } from "./components/Viewer3D";
 import CloseUp, { type CloseUpTarget } from "./components/CloseUp";
 
 type Layout = "Compare" | "2D Plan" | "3D Model";
@@ -349,11 +349,37 @@ function ExploreBar({ model, focus, walking, onFocus, onWalk }: {
         className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold shadow-sm ${walking ? "bg-brand-600 text-white" : "border border-slate-200 bg-white/95 text-slate-700 hover:bg-slate-50"}`}>
         {walking ? "Stop walking" : "Walk"}
       </button>
+      {walking && <WalkPad />}
       <span className="rounded-lg bg-ink/75 px-2 py-1 text-[11px] text-white">
-        {walking ? "Click the view to look around · W A S D to walk · Shift to run · Esc frees the mouse"
+        {walking ? "Drag the view to look around · W/↑ forward · S/↓ back · ←/→ turn · A/D step sideways · Shift runs"
           : focus?.kind === "room" ? "Drag to look around, up at the ceiling and down at the floor · scroll to zoom"
             : "Double-click a room to step inside · double-click a wall for its close-up"}
       </span>
+    </div>
+  );
+}
+
+/** Press-and-hold buttons for walking without a keyboard (also works on touch screens). */
+function WalkPad() {
+  const hold = (code: string) => ({
+    onPointerDown: (e: React.PointerEvent) => {
+      e.preventDefault();
+      walkKeys.add(code);
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* keep holding without capture */ }
+    },
+    onPointerUp: () => walkKeys.delete(code),
+    onPointerCancel: () => walkKeys.delete(code),
+    onLostPointerCapture: () => walkKeys.delete(code),
+  });
+  const cls = "grid size-8 place-items-center rounded-lg border border-slate-200 bg-white/95 text-sm font-bold text-slate-700 shadow-sm select-none active:bg-brand-600 active:text-white touch-none";
+  return (
+    <div className="grid grid-cols-3 gap-1" aria-label="Walk controls">
+      <span />
+      <button className={cls} aria-label="Walk forward" {...hold("ArrowUp")}>↑</button>
+      <span />
+      <button className={cls} aria-label="Turn left" {...hold("ArrowLeft")}>↶</button>
+      <button className={cls} aria-label="Walk back" {...hold("ArrowDown")}>↓</button>
+      <button className={cls} aria-label="Turn right" {...hold("ArrowRight")}>↷</button>
     </div>
   );
 }
