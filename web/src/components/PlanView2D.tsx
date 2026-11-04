@@ -538,7 +538,7 @@ function OpeningSymbol({ w, o, h }: { w: Wall; o: Opening; h: number }) {
   const frame = <polygon points={pts(spanRect(w, s0, s1))} fill="#ffffff" stroke="#2a2833" strokeWidth={20} />;
   if (o.style === "louvered" || o.kind === "ventilator") {
     const n = Math.max(2, Math.round(o.width / 120));
-    return <g>{frame}{Array.from({ length: n }, (_, i) => line(s0 + (i + 0.5) * o.width / n - 40, s0 + (i + 0.5) * o.width / n + 40, 0, glass, 16))}</g>;
+    return <g>{frame}{Array.from({ length: n }, (_, i) => <g key={i}>{line(s0 + (i + 0.5) * o.width / n - 40, s0 + (i + 0.5) * o.width / n + 40, 0, glass, 16)}</g>)}</g>;
   }
   if (o.style === "sliding_window") return <g>{frame}{line(s0, mid + 80, -h / 3, glass, 24)}{line(mid - 80, s1, h / 3, glass, 24)}</g>;
   if (o.style === "fixed") return <g>{frame}{line(s0, s1, 0, glass, 45)}</g>;

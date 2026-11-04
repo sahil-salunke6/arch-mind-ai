@@ -83,6 +83,8 @@ export interface BuildingModel {
   floors: Floor[];
   roof: { type: string; parapet: number };
   assemblies: Record<string, Assembly>;
+  /** Chosen construction options, keyed by part, e.g. "wall.exterior.masonry" → "aac_block". */
+  specs?: Record<string, string>;
 }
 
 export type Selection = { kind: "wall" | "opening" | "room" | "furniture"; id: string } | null;
@@ -90,6 +92,9 @@ export type Tool = "select" | "wall" | "door" | "window";
 
 export type ViewName = "North" | "South" | "East" | "West" | "NE" | "NW" | "SE" | "SW" | "Top" | "Bottom";
 export const VIEWS: ViewName[] = ["North", "South", "East", "West", "NE", "NW", "SE", "SW", "Top", "Bottom"];
+
+/** Where the 3D camera is: the whole house (null), inside one room, or outside at eye level. */
+export type Focus = { kind: "room"; id: string } | { kind: "outside" } | null;
 
 /** How much of the house the 3D view shows: auto picks roof for straight-on elevations, open otherwise. */
 export type Cut = "auto" | "roof" | "open" | "doll";

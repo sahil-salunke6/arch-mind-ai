@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Box as BoxIcon, Maximize2, SquareDashed } from "lucide-react";
 import { api, type ProjectInfo, type SketchReport } from "./lib/api";
-import { VIEWS, type BuildingModel, type Layers, type Selection, type Tool, type ViewName } from "./types";
+import { VIEWS, type BuildingModel, type Focus, type Layers, type Selection, type Tool, type ViewName } from "./types";
 import { DownloadMenu, Stepper, TopNav, type SaveStatus } from "./components/Chrome";
 import { blankProject, deleteFurniture, deleteOpening, deleteWall, rotateFurniture } from "./lib/edit";
 import { useHistory } from "./lib/history";
 import { LeftPanel, RightPanel, type Upload } from "./components/Panels";
 import PlanView2D from "./components/PlanView2D";
 import SketchView from "./components/SketchView";
-import Viewer3D from "./components/Viewer3D";
+import Viewer3D, { walkKeys } from "./components/Viewer3D";
+import CloseUp, { type CloseUpTarget } from "./components/CloseUp";
 
 type Layout = "Compare" | "2D Plan" | "3D Model";
 
@@ -35,6 +36,11 @@ export default function App() {
   const [layers, setLayers] = useState<Layers>({ cut: "auto", furniture: true, labels: true, dimensions: true });
   const [rawSelection, setSelection] = useState<Selection>(null);
   const [tool, setTool] = useState<Tool>("select");
+  const [closeUp, setCloseUp] = useState<CloseUpTarget | null>(null);
+  const [focus, setFocus] = useState<Focus>(null);
+  const [walking, setWalking] = useState(false);
+  const goTo = (f: Focus) => { setFocus(f); setWalking(false); setLayout("3D Model"); };
+  const openCloseUp = (t: CloseUpTarget) => { setCloseUp(t); setLayout("3D Model"); };
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
   const [thumbs, setThumbs] = useState<Partial<Record<ViewName, string>>>({});
 
@@ -162,6 +168,8 @@ export default function App() {
 
   const pickView = (v: ViewName) => {
     setView(v);
+    setFocus(null);
+    setWalking(false);
     if (layout === "2D Plan") setLayout("3D Model");
   };
 
@@ -262,12 +270,15 @@ export default function App() {
             )}
             {show3D && (
               <Card title={`3D Model · ${view} view`} accent onExpand={layout === "Compare" ? () => setLayout("3D Model") : undefined}>
+                {closeUp && <CloseUp model={model} target={closeUp} onEdit={(m) => edit(m)} onClose={() => setCloseUp(null)} />}
+                <ExploreBar model={model} focus={focus} walking={walking} onFocus={goTo} onWalk={setWalking} />
                 <CutControl value={layers.cut} onChange={(cut) => setLayers((l) => ({ ...l, cut }))} />
                 <Viewer3D
                   model={model} layers={layers} view={view} mode={mode}
                   selectedWall={selection?.kind === "wall" ? selection.id : null}
                   onSelectWall={(id) => setSelection(id ? { kind: "wall", id } : null)}
                   onCanvas={setCanvas} onThumbnails={setThumbs}
+                  focus={focus} walking={walking} onFocus={goTo} onCloseUp={openCloseUp}
                 />
               </Card>
             )}
@@ -300,7 +311,8 @@ export default function App() {
         <div className="lg:col-span-2 xl:col-span-1">
           <RightPanel
             model={model} layers={layers} onLayers={setLayers}
-            selection={selection} onSelect={setSelection} onEdit={edit}
+            selection={selection} onSelect={setSelection} onEdit={edit} onCloseUp={openCloseUp}
+            onFocusRoom={(id) => goTo({ kind: "room", id })}
             footer={
               <DownloadMenu items={[
                 { label: "Blueprint set (.pdf, A3)", onClick: () => projectId && exportFile(api.pdfUrl(projectId), `${model.name}.pdf`) },
@@ -315,6 +327,59 @@ export default function App() {
           </p>
         </div>
       </main>
+    </div>
+  );
+}
+
+/** Bottom-left of the 3D view: jump into a room or outside, and start/stop walking. */
+function ExploreBar({ model, focus, walking, onFocus, onWalk }: {
+  model: BuildingModel; focus: Focus; walking: boolean; onFocus: (f: Focus) => void; onWalk: (w: boolean) => void;
+}) {
+  const value = !focus ? "house" : focus.kind === "outside" ? "outside" : focus.id;
+  return (
+    <div className="absolute bottom-2 left-2 z-10 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-1.5">
+      <select value={value} aria-label="Go to"
+        onChange={(e) => onFocus(e.target.value === "house" ? null : e.target.value === "outside" ? { kind: "outside" } : { kind: "room", id: e.target.value })}
+        className="rounded-lg border border-slate-200 bg-white/95 px-2 py-1.5 text-xs font-medium shadow-sm">
+        <option value="house">Whole house</option>
+        <option value="outside">Outside (eye level)</option>
+        {model.floors[0].rooms.map((r) => <option key={r.id} value={r.id}>Inside: {r.name}</option>)}
+      </select>
+      <button onClick={(e) => { e.currentTarget.blur(); onWalk(!walking); }}
+        className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold shadow-sm ${walking ? "bg-brand-600 text-white" : "border border-slate-200 bg-white/95 text-slate-700 hover:bg-slate-50"}`}>
+        {walking ? "Stop walking" : "Walk"}
+      </button>
+      {walking && <WalkPad />}
+      <span className="rounded-lg bg-ink/75 px-2 py-1 text-[11px] text-white">
+        {walking ? "Drag the view to look around · W/↑ forward · S/↓ back · ←/→ turn · A/D step sideways · Shift runs"
+          : focus?.kind === "room" ? "Drag to look around, up at the ceiling and down at the floor · scroll to zoom"
+            : "Double-click a room to step inside · double-click a wall for its close-up"}
+      </span>
+    </div>
+  );
+}
+
+/** Press-and-hold buttons for walking without a keyboard (also works on touch screens). */
+function WalkPad() {
+  const hold = (code: string) => ({
+    onPointerDown: (e: React.PointerEvent) => {
+      e.preventDefault();
+      walkKeys.add(code);
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* keep holding without capture */ }
+    },
+    onPointerUp: () => walkKeys.delete(code),
+    onPointerCancel: () => walkKeys.delete(code),
+    onLostPointerCapture: () => walkKeys.delete(code),
+  });
+  const cls = "grid size-8 place-items-center rounded-lg border border-slate-200 bg-white/95 text-sm font-bold text-slate-700 shadow-sm select-none active:bg-brand-600 active:text-white touch-none";
+  return (
+    <div className="grid grid-cols-3 gap-1" aria-label="Walk controls">
+      <span />
+      <button className={cls} aria-label="Walk forward" {...hold("ArrowUp")}>↑</button>
+      <span />
+      <button className={cls} aria-label="Turn left" {...hold("ArrowLeft")}>↶</button>
+      <button className={cls} aria-label="Walk back" {...hold("ArrowDown")}>↓</button>
+      <button className={cls} aria-label="Turn right" {...hold("ArrowRight")}>↷</button>
     </div>
   );
 }

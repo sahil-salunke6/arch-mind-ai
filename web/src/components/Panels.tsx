@@ -4,6 +4,7 @@ import {
   Pencil, RotateCcw, RotateCw, Sparkles, SquareDashed, Trash2,
 } from "lucide-react";
 import type { ProjectInfo, SketchReport } from "../lib/api";
+import type { CloseUpTarget } from "./CloseUp";
 import type { BuildingModel, Layers as LayerState, Opening, RoomType, Selection, Side } from "../types";
 import { centroid, ftIn, polygonArea, roomSize, sqft, summary, wallLength } from "../lib/geometry";
 import {
@@ -260,6 +261,8 @@ export function RightPanel(props: {
   selection: Selection;
   onSelect: (s: Selection) => void;
   onEdit: Edit;
+  onCloseUp: (t: CloseUpTarget) => void;
+  onFocusRoom: (id: string) => void;
   footer: ReactNode;
 }) {
   const { model, selection, onEdit } = props;
@@ -286,6 +289,7 @@ export function RightPanel(props: {
                 <Select value={wall.type} options={["exterior", "interior"]} labels={{ exterior: 'External (9")', interior: 'Internal (4.5")' }}
                   onChange={(t) => onEdit(setWallType(model, wall.id, t as "exterior" | "interior"))} />
               </Field>
+              <ZoomButton label="Zoom into wall: layers, bricks, wires, pipes" onClick={() => props.onCloseUp({ kind: "wall", id: wall.id })} />
               <DeleteButton label="Delete wall" onClick={() => { onEdit(deleteWall(model, wall.id)); props.onSelect(null); }} />
             </div>
             <WallDetails model={model} wallId={wall.id} />
@@ -309,6 +313,7 @@ export function RightPanel(props: {
                   Flip swing side
                 </button>
               )}
+              <ZoomButton label="Construction close-up" onClick={() => props.onCloseUp({ kind: "opening", id: opening.id })} />
               <DeleteButton label={`Delete ${opening.kind}`} onClick={() => { onEdit(deleteOpening(model, opening.id)); props.onSelect(null); }} />
             </div>
           </>
@@ -360,12 +365,19 @@ export function RightPanel(props: {
                   {Object.entries(FURNITURE).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
                 </select>
               </Field>
+              <ZoomButton label="Look inside this room in 3D" onClick={() => props.onFocusRoom(room.id)} />
+              <ZoomButton label="Floor build-up close-up" onClick={() => props.onCloseUp({ kind: "floor", roomId: room.id })} />
               <p className="text-xs text-slate-500">Rooms come from closed loops of walls; move the walls to resize the room.</p>
             </div>
           </>
         )}
 
-        {tab === "Details" && !selection && <Summary model={model} onEdit={onEdit} />}
+        {tab === "Details" && !selection && (
+          <>
+            <Summary model={model} onEdit={onEdit} />
+            <div className="mt-3"><ZoomButton label="Roof build-up close-up" onClick={() => props.onCloseUp({ kind: "roof" })} /></div>
+          </>
+        )}
 
         {tab === "Measurements" && (
           <table className="w-full text-sm">
@@ -556,6 +568,14 @@ function Select({ value, options, labels, onChange }: { value: string; options: 
     <select value={value} onChange={(e) => onChange(e.target.value)} className="max-w-44 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm">
       {options.map((o) => <option key={o} value={o}>{labels?.[o] ?? title(o)}</option>)}
     </select>
+  );
+}
+
+function ZoomButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="flex w-full items-center justify-center gap-2 rounded-lg border border-brand-200 bg-brand-50 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100">
+      <Layers size={15} /> {label}
+    </button>
   );
 }
 
